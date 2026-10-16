@@ -1,0 +1,45 @@
+# Unsigned IPA for sideload testing.
+# Free private GitHub accounts bill macOS minutes at 10x, so this job stays
+# small: one build, cached XcodeGen and Swift Package Manager, 20 minute cap.
+name: Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    name: Build unsigned IPA
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache XcodeGen and Swift Package Manager
+        uses: actions/cache@v4
+        with:
+          path: |
+            .tools/xcodegen
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/org.swift.swiftpm
+          key: ${{ runner.os }}-xcodegen-2.46.0-spm-v1
+          restore-keys: |
+            ${{ runner.os }}-xcodegen-2.46.0-spm-
+
+      - name: Build unsigned IPA
+        run: bash scripts/build-unsigned-ipa.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: RepostSweep-unsigned-ipa
+          path: RepostSweep-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
