@@ -31,6 +31,11 @@ struct SettingsView: View {
                                         Text("@\(account.uniqueId)")
                                             .font(.subheadline)
                                             .foregroundStyle(Theme.muted)
+                                        if let stats = account.statsLine {
+                                            Text(stats)
+                                                .font(.subheadline)
+                                                .foregroundStyle(Theme.muted)
+                                        }
                                     }
                                 }
                             } else if session.hasSessionCookie {
@@ -47,9 +52,11 @@ struct SettingsView: View {
                                 .foregroundStyle(Theme.muted)
                                 .fixedSize(horizontal: false, vertical: true)
                             if session.hasSessionCookie == false && session.account == nil {
-                                PrimaryButton(title: "Log in to TikTok", systemImage: "person.fill") {
+                                TikTokLoginControl(phase: session.appLoginPhase) {
                                     dismiss()
                                     session.beginLogin()
+                                } onCancel: {
+                                    session.cancelLogin()
                                 }
                             } else {
                                 Button("Log out") {

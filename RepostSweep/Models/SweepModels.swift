@@ -5,16 +5,27 @@ struct TikTokAccount: Equatable, Codable {
     var nickname: String
     var secUid: String
     var avatarURL: String
+    var followerCount: Int
+    var followingCount: Int
 
     enum CodingKeys: String, CodingKey {
-        case uniqueId, nickname, secUid, avatarURL
+        case uniqueId, nickname, secUid, avatarURL, followerCount, followingCount
     }
 
-    init(uniqueId: String, nickname: String, secUid: String, avatarURL: String) {
+    init(
+        uniqueId: String,
+        nickname: String,
+        secUid: String,
+        avatarURL: String,
+        followerCount: Int = 0,
+        followingCount: Int = 0
+    ) {
         self.uniqueId = uniqueId
         self.nickname = nickname
         self.secUid = secUid
         self.avatarURL = avatarURL
+        self.followerCount = followerCount
+        self.followingCount = followingCount
     }
 
     init(from decoder: Decoder) throws {
@@ -23,6 +34,32 @@ struct TikTokAccount: Equatable, Codable {
         nickname = try container.decodeIfPresent(String.self, forKey: .nickname) ?? ""
         secUid = try container.decodeIfPresent(String.self, forKey: .secUid) ?? ""
         avatarURL = try container.decodeIfPresent(String.self, forKey: .avatarURL) ?? ""
+        followerCount = try container.decodeIfPresent(Int.self, forKey: .followerCount) ?? 0
+        followingCount = try container.decodeIfPresent(Int.self, forKey: .followingCount) ?? 0
+    }
+
+    var statsLine: String? {
+        guard followerCount > 0 || followingCount > 0 else { return nil }
+        return "\(Self.compact(followerCount)) followers · \(Self.compact(followingCount)) following"
+    }
+
+    private static func compact(_ value: Int) -> String {
+        let number = Double(value)
+        if number >= 1_000_000 {
+            return trim(number / 1_000_000) + "M"
+        }
+        if number >= 1_000 {
+            return trim(number / 1_000) + "K"
+        }
+        return "\(value)"
+    }
+
+    private static func trim(_ value: Double) -> String {
+        let text = String(format: "%.1f", value)
+        if text.hasSuffix(".0") {
+            return String(text.dropLast(2))
+        }
+        return text
     }
 }
 

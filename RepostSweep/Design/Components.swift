@@ -179,6 +179,99 @@ struct MarkView: View {
     }
 }
 
+struct TikTokMark: View {
+    var size: CGFloat = 22
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "music.note")
+                .font(.system(size: size, weight: .bold))
+                .foregroundStyle(Theme.cyan)
+                .offset(x: -1.2, y: -1)
+            Image(systemName: "music.note")
+                .font(.system(size: size, weight: .bold))
+                .foregroundStyle(Theme.pink)
+                .offset(x: 1.2, y: 1)
+            Image(systemName: "music.note")
+                .font(.system(size: size, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: size + 6, height: size + 6)
+        .accessibilityHidden(true)
+    }
+}
+
+struct ContinueWithTikTokButton: View {
+    var action: () -> Void
+
+    var body: some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            HStack(spacing: 10) {
+                TikTokMark()
+                Text("Continue with TikTok")
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .foregroundStyle(.white)
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+        }
+        .buttonStyle(PressScaleStyle())
+        .accessibilityLabel("Continue with TikTok")
+    }
+}
+
+struct TikTokLoginControl: View {
+    var phase: TikTokWebSession.AppLoginPhase
+    var onStart: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        switch phase {
+        case .idle:
+            ContinueWithTikTokButton(action: onStart)
+        case .loading:
+            waiting(title: "Opening TikTok…")
+        case .waiting:
+            waiting(title: "Waiting for TikTok…")
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 10) {
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.pink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                PrimaryButton(title: "Retry", systemImage: "arrow.clockwise", action: onStart)
+            }
+        }
+    }
+
+    private func waiting(title: String) -> some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .tint(Theme.ink)
+            Text(title)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(Theme.ink)
+            Button("Cancel", action: onCancel)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(Theme.muted)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
+    }
+}
+
 struct AvatarView: View {
     var urlString: String
     var fallback: String
@@ -196,7 +289,7 @@ struct AvatarView: View {
             Text(initial)
                 .font(.system(size: size * 0.36, weight: .bold, design: .rounded))
                 .foregroundStyle(.black)
-            if let url = URL(string: urlString), url.scheme == "https" {
+            if let url = AvatarView.allowedURL(urlString) {
                 AsyncImage(url: url) { phase in
                     if case .success(let image) = phase {
                         image
@@ -209,6 +302,19 @@ struct AvatarView: View {
         .frame(width: size, height: size)
         .clipShape(Circle())
         .accessibilityHidden(true)
+    }
+
+    private static func allowedURL(_ urlString: String) -> URL? {
+        let lower = urlString.lowercased()
+        if lower.contains("googleusercontent")
+            || lower.contains("ggpht")
+            || lower.contains("google.com")
+            || lower.contains("gstatic")
+            || lower.contains("fbcdn") {
+            return nil
+        }
+        guard let url = URL(string: urlString), url.scheme == "https" else { return nil }
+        return url
     }
 }
 

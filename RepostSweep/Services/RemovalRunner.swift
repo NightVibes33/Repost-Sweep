@@ -56,6 +56,7 @@ final class RemovalRunner: ObservableObject {
         siteChangeDetail = nil
         stopRequested = false
         statusText = "Starting"
+        session.debugDetail = ""
         isRunning = true
         session.removalActive = true
         Haptics.burst()

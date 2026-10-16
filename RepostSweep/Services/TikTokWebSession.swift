@@ -15,8 +15,9 @@ final class TikTokWebSession: NSObject, ObservableObject {
     @Published var isWorking = false
     @Published var statusText = ""
     @Published var banner: String?
-    @Published var showingLogin = false
     @Published var showingDebugPage = false
+    @Published var appLoginPhase: AppLoginPhase = .idle
+    @Published var debugDetail = ""
     @Published var isPageLoading = false
     @Published var loginProgress: Double = 0
     @Published var pageError: String?
@@ -29,11 +30,23 @@ final class TikTokWebSession: NSObject, ObservableObject {
 
     private let bridgeSource: String
     private let gate = JSGate()
-    private var loginWatch: Task<Void, Never>?
     private var progressObservation: NSKeyValueObservation?
+    private var activeObserver: AnyCancellable?
+    private var resignObserver: AnyCancellable?
     private var didWarmUp = false
     private var didAdopt = false
     private var generation = 0
+    private var loginGeneration = 0
+    private var expectingHandoff = false
+    private var didOpenHandoff = false
+    private var didLeaveApp = false
+    private var appLoginInFlight = false
+    private var lastBlockedURL = ""
+    private var handoffWatch: Task<Void, Never>?
+    private var returnWatch: Task<Void, Never>?
+    private var loadingWatch: Task<Void, Never>?
+    private var foregroundSliceStart: Date?
+    private var foregroundAccumulated: TimeInterval = 0
 
     override init() {
         bridgeSource = Self.loadBridge()
@@ -44,6 +57,7 @@ final class TikTokWebSession: NSObject, ObservableObject {
         preferences.preferredContentMode = .mobile
         configuration.defaultWebpagePreferences = preferences
         configuration.allowsInlineMediaPlayback = true
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         let world = ScriptWorld.page
         let hideBanners = WKUserScript(
             source: Self.bannerHideScript,
@@ -63,6 +77,13 @@ final class TikTokWebSession: NSObject, ObservableObject {
             forMainFrameOnly: true,
             in: world
         )
+        let bridgeAtStart = WKUserScript(
+            source: bridgeSource,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: world
+        )
+        configuration.userContentController.addUserScript(bridgeAtStart)
         configuration.userContentController.addUserScript(hideBanners)
         configuration.userContentController.addUserScript(hideBannersAgain)
         configuration.userContentController.addUserScript(bridge)
@@ -91,6 +112,16 @@ final class TikTokWebSession: NSObject, ObservableObject {
                 }
             }
         }
+        activeObserver = NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.appBecameActive()
+            }
+        resignObserver = NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.appWillResign()
+            }
     }
 
     func warmUp() async {
@@ -105,27 +136,15 @@ final class TikTokWebSession: NSObject, ObservableObject {
         Task { await startLogin() }
     }
 
-    func closeLogin() {
-        showingLogin = false
-        loginWatch?.cancel()
-        loginWatch = nil
-    }
-
-    func loginSheetDismissed() {
-        loginWatch?.cancel()
-        loginWatch = nil
-        Task { @MainActor in
-            if await self.refreshSessionCookie() {
-                self.adoptSession()
-            }
-        }
-    }
-
-    func reloadLogin() {
+    func cancelLogin() {
+        loginGeneration += 1
+        stopLoginWatch()
+        expectingHandoff = false
+        didOpenHandoff = false
+        didLeaveApp = false
+        appLoginInFlight = false
+        appLoginPhase = .idle
         pageError = nil
-        isPageLoading = true
-        loginProgress = 0
-        webView.load(URLRequest(url: TikTokURL.login))
     }
 
     func openDebugPage() {
@@ -162,6 +181,7 @@ final class TikTokWebSession: NSObject, ObservableObject {
         banner = nil
         siteChangeMessage = nil
         notice = nil
+        debugDetail = ""
         statusText = "Looking for reposts"
         defer {
             if token == generation {
@@ -246,25 +266,27 @@ final class TikTokWebSession: NSObject, ObservableObject {
         let token = generation
         await ensureHomePage()
         guard token == generation else { return .notLoggedIn }
-        do {
-            let envelope = try await invoke(.remove, payload: ["itemId": itemId])
-            if envelope.ok {
-                return .removed
-            }
-            switch envelope.code {
-            case "RATE_LIMITED":
-                return .rateLimited
-            case "NOT_LOGGED_IN":
-                return .notLoggedIn
-            case "ENDPOINT_CHANGED", "PARSE", "BRIDGE_MISSING", "NOT_ON_TIKTOK", "UI_CHANGED":
-                let detail = envelope.message.isEmpty ? envelope.code : "\(envelope.code). \(envelope.message)"
-                return .siteChanged(detail)
-            default:
-                let detail = envelope.message.isEmpty ? envelope.code : envelope.message
-                return .failed(detail)
-            }
-        } catch {
-            return .failed("The page didn’t answer.")
+        let api = await apiRemoval(itemId)
+        switch api {
+        case .removed, .rateLimited, .notLoggedIn:
+            return api
+        case .siteChanged(let detail), .failed(let detail):
+            noteDebug(detail)
+            guard token == generation else { return .notLoggedIn }
+            return await uiRemoval(itemId: itemId, prior: detail)
+        }
+    }
+
+    func noteDebug(_ text: String) {
+        let clipped = String(text.prefix(500))
+        guard clipped.isEmpty == false else { return }
+        if debugDetail.isEmpty {
+            debugDetail = clipped
+        } else {
+            debugDetail = clipped + "\n—\n" + debugDetail
+        }
+        if debugDetail.count > 4000 {
+            debugDetail = String(debugDetail.prefix(4000))
         }
     }
 
@@ -287,9 +309,9 @@ final class TikTokWebSession: NSObject, ObservableObject {
 
     func signOut() async {
         generation += 1
+        loginGeneration += 1
         let token = generation
-        loginWatch?.cancel()
-        loginWatch = nil
+        stopLoginWatch()
         didAdopt = false
         isWorking = false
         didScan = false
@@ -300,10 +322,15 @@ final class TikTokWebSession: NSObject, ObservableObject {
         banner = nil
         siteChangeMessage = nil
         notice = nil
-        showingLogin = false
+        debugDetail = ""
         showingDebugPage = false
         hasSessionCookie = false
         statusText = ""
+        expectingHandoff = false
+        didOpenHandoff = false
+        didLeaveApp = false
+        appLoginInFlight = false
+        appLoginPhase = .idle
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             WKWebsiteDataStore.default().removeData(
                 ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
@@ -313,35 +340,250 @@ final class TikTokWebSession: NSObject, ObservableObject {
             }
         }
         guard token == generation else { return }
-        if showingLogin {
-            webView.load(URLRequest(url: TikTokURL.login))
-        } else {
-            webView.load(URLRequest(url: URL(string: "about:blank")!))
-        }
+        webView.load(URLRequest(url: URL(string: "about:blank")!))
     }
 
     private func startLogin() async {
+        loginGeneration += 1
+        let token = loginGeneration
+        stopLoginWatch()
+        expectingHandoff = false
+        didOpenHandoff = false
+        didLeaveApp = false
+        appLoginInFlight = false
+        lastBlockedURL = ""
+        foregroundAccumulated = 0
+        foregroundSliceStart = nil
+        pageError = nil
+        notice = nil
+        appLoginPhase = .loading
         if await refreshSessionCookie() {
+            guard token == loginGeneration else { return }
             adoptSession()
             return
         }
-        pageError = nil
-        notice = nil
+        guard token == loginGeneration else { return }
+        expectingHandoff = true
         isPageLoading = true
         loginProgress = 0
-        showingLogin = true
         webView.customUserAgent = TikTokURL.mobileSafari
         webView.load(URLRequest(url: TikTokURL.login))
-        loginWatch?.cancel()
-        loginWatch = Task { @MainActor [weak self] in
+        armLoadingWatchdog(token: token)
+    }
+
+    private func stopLoginWatch() {
+        handoffWatch?.cancel()
+        returnWatch?.cancel()
+        loadingWatch?.cancel()
+        handoffWatch = nil
+        returnWatch = nil
+        loadingWatch = nil
+    }
+
+    private func armLoadingWatchdog(token: Int) {
+        loadingWatch?.cancel()
+        loadingWatch = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 28_000_000_000)
+            guard Task.isCancelled == false else { return }
+            guard token == self.loginGeneration else { return }
+            guard self.appLoginPhase == .loading, self.didOpenHandoff == false, self.appLoginInFlight == false, self.handoffWatch == nil else { return }
+            self.failLogin("TikTok’s login page didn’t load. Check the connection and retry.")
+        }
+    }
+
+    private func triggerAppLogin() async {
+        guard expectingHandoff, didOpenHandoff == false, appLoginInFlight == false else { return }
+        let token = loginGeneration
+        appLoginInFlight = true
+        defer { appLoginInFlight = false }
+        do {
+            let envelope = try await invoke(.openAppLogin, payload: [:])
+            guard token == loginGeneration, expectingHandoff else { return }
+            if didOpenHandoff { return }
+            if envelope.ok {
+                if let url = handoffURL(in: envelope.message) {
+                    handleExternalURL(url)
+                }
+                if didOpenHandoff == false {
+                    scheduleHandoffTimeout(token: token, tapped: envelope.message)
+                }
+            } else {
+                let message = envelope.message.isEmpty
+                    ? "TikTok’s login page didn’t show Log in with TikTok app."
+                    : envelope.message
+                failLogin(message)
+            }
+        } catch {
+            guard token == loginGeneration, expectingHandoff, didOpenHandoff == false else { return }
+        }
+    }
+
+    private func handoffURL(in message: String) -> URL? {
+        let schemes = ["tiktok://", "snssdk1233://", "snssdk1128://"]
+        let lower = message.lowercased()
+        for scheme in schemes {
+            guard let range = lower.range(of: scheme) else { continue }
+            let offset = lower.distance(from: lower.startIndex, to: range.lowerBound)
+            let start = message.index(message.startIndex, offsetBy: offset)
+            let tail = message[start...]
+            let end = tail.firstIndex(where: { $0.isWhitespace }) ?? tail.endIndex
+            let raw = String(tail[..<end]).trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”"))
+            if let url = URL(string: raw), url.scheme != nil {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func scheduleHandoffTimeout(token: Int, tapped: String) {
+        handoffWatch?.cancel()
+        handoffWatch = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 25_000_000_000)
+            guard Task.isCancelled == false else { return }
+            guard token == self.loginGeneration, self.expectingHandoff, self.didOpenHandoff == false else { return }
+            var message = "Tapped Log in with TikTok app, but no tiktok://, snssdk1233://, or snssdk1128:// link arrived."
+            if tapped.isEmpty == false {
+                message = "\(tapped) No tiktok://, snssdk1233://, or snssdk1128:// link arrived."
+            }
+            if self.lastBlockedURL.isEmpty == false {
+                message += " Last non-web navigation: \(self.lastBlockedURL)."
+            }
+            self.failLogin(message)
+        }
+    }
+
+    private func failLogin(_ message: String) {
+        guard appLoginPhase == .loading || appLoginPhase == .waiting else { return }
+        expectingHandoff = false
+        didOpenHandoff = false
+        stopLoginWatch()
+        pageError = message
+        appLoginPhase = .failed(message)
+    }
+
+    private func beginReturnWatch() {
+        returnWatch?.cancel()
+        foregroundAccumulated = 0
+        foregroundSliceStart = UIApplication.shared.applicationState == .active ? Date() : nil
+        let token = loginGeneration
+        returnWatch = Task { @MainActor in
             while Task.isCancelled == false {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard let self, self.showingLogin else { return }
                 if await self.refreshSessionCookie() {
                     self.adoptSession()
                     return
                 }
+                if self.foregroundElapsed() > 45 {
+                    let message = self.didLeaveApp
+                        ? "Returned from TikTok, but no session cookie (sessionid, sessionid_ss, or sid_tt) was set."
+                        : "TikTok’s app link was opened, but this app stayed in the foreground and no session cookie (sessionid, sessionid_ss, or sid_tt) was set."
+                    self.failLogin(message)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard token == self.loginGeneration, self.appLoginPhase == .waiting else { return }
             }
+        }
+    }
+
+    private func foregroundElapsed() -> TimeInterval {
+        var total = foregroundAccumulated
+        if let start = foregroundSliceStart {
+            total += Date().timeIntervalSince(start)
+        }
+        return total
+    }
+
+    private func appBecameActive() {
+        guard appLoginPhase == .waiting else { return }
+        if foregroundSliceStart == nil {
+            foregroundSliceStart = Date()
+        }
+        Task { @MainActor in
+            if await self.refreshSessionCookie() {
+                self.adoptSession()
+            }
+        }
+    }
+
+    private func appWillResign() {
+        guard appLoginPhase == .waiting || expectingHandoff else { return }
+        didLeaveApp = true
+        if let start = foregroundSliceStart {
+            foregroundAccumulated += Date().timeIntervalSince(start)
+            foregroundSliceStart = nil
+        }
+    }
+
+    private func handleExternalURL(_ url: URL) {
+        let scheme = url.scheme?.lowercased() ?? ""
+        let handoff = scheme == "tiktok" || scheme == "snssdk1233" || scheme == "snssdk1128"
+        guard expectingHandoff else { return }
+        guard handoff else {
+            lastBlockedURL = url.absoluteString
+            return
+        }
+        guard didOpenHandoff == false else { return }
+        let token = loginGeneration
+        didOpenHandoff = true
+        expectingHandoff = false
+        handoffWatch?.cancel()
+        loadingWatch?.cancel()
+        appLoginPhase = .waiting
+        beginReturnWatch()
+        UIApplication.shared.open(url, options: [:]) { success in
+            Task { @MainActor in
+                guard token == self.loginGeneration, self.appLoginPhase == .waiting else { return }
+                guard success == false else { return }
+                if UIApplication.shared.canOpenURL(url) == false {
+                    self.failLogin("The TikTok app isn’t installed, so \(scheme):// could not be opened.")
+                } else {
+                    self.failLogin("iOS could not open \(scheme)://.")
+                }
+            }
+        }
+    }
+
+    private func apiRemoval(_ itemId: String) async -> RemovalAttempt {
+        do {
+            let envelope = try await invoke(.remove, payload: ["itemId": itemId])
+            if envelope.ok {
+                return .removed
+            }
+            let detail = envelope.message.isEmpty ? envelope.code : "\(envelope.code). \(envelope.message)"
+            switch envelope.code {
+            case "RATE_LIMITED":
+                return .rateLimited
+            case "NOT_LOGGED_IN":
+                return .notLoggedIn
+            default:
+                return .failed(detail)
+            }
+        } catch {
+            return .failed("The page didn’t answer.")
+        }
+    }
+
+    private func uiRemoval(itemId: String, prior: String) async -> RemovalAttempt {
+        let token = generation
+        guard let uniqueId = account?.uniqueId, uniqueId.isEmpty == false else {
+            return .failed(prior.isEmpty ? "No TikTok username to open the video." : prior)
+        }
+        guard let url = TikTokURL.video(uniqueId, itemId) else {
+            return .failed(prior)
+        }
+        webView.load(URLRequest(url: url))
+        await waitForSettle()
+        guard token == generation else { return .notLoggedIn }
+        do {
+            let envelope = try await invoke(.unrepostTap, payload: ["itemId": itemId])
+            if envelope.ok {
+                return .removed
+            }
+            let detail = envelope.message.isEmpty ? envelope.code : envelope.message
+            noteDebug(detail)
+            return .failed(detail)
+        } catch {
+            return .failed(prior.isEmpty ? "The video page didn’t answer." : prior)
         }
     }
 
@@ -349,9 +591,11 @@ final class TikTokWebSession: NSObject, ObservableObject {
         let already = didAdopt
         didAdopt = true
         hasSessionCookie = true
-        showingLogin = false
-        loginWatch?.cancel()
-        loginWatch = nil
+        expectingHandoff = false
+        didOpenHandoff = false
+        stopLoginWatch()
+        appLoginPhase = .idle
+        pageError = nil
         guard already == false else { return }
         Haptics.success()
         Task { @MainActor in
@@ -387,14 +631,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
         if onSite == false || onLogin || webView.url == nil {
             webView.load(URLRequest(url: TikTokURL.home))
             await waitForSettle()
-        }
-    }
-
-    private func hideLoginPromos() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            webView.evaluateJavaScript(Self.loginChromeScript) { _, _ in
-                continuation.resume()
-            }
         }
     }
 
@@ -631,19 +867,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
     })();
     """
 
-    private static let loginChromeScript = """
-    (function () {
-      var css = 'header,[data-e2e="top-bar"],[class*="DivHeaderContainer"],[class*="HeaderContainer"],#app-header,[data-e2e="cookie-banner"],[class*="CookieBanner"],[class*="DivOpenApp"],[class*="OpenApp"],[data-e2e="bottom-cta"],[class*="AppDownload"],[class*="DownloadBar"],a[href*="apps.apple.com"],[class*="BottomBanner"]{display:none!important;}';
-      var node = document.getElementById("repost-sweep-login-chrome");
-      if (!node) {
-        node = document.createElement("style");
-        node.id = "repost-sweep-login-chrome";
-        (document.head || document.documentElement).appendChild(node);
-      }
-      node.textContent = css;
-    })();
-    """
-
     private static func loadBridge() -> String {
         let url = Bundle.main.url(forResource: "TikTokBridge", withExtension: "js")
             ?? Bundle.main.url(forResource: "TikTokBridge", withExtension: "js", subdirectory: "Resources")
@@ -657,7 +880,9 @@ final class TikTokWebSession: NSObject, ObservableObject {
           remove: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "TikTokBridge.js is missing from the app." }; },
           focusReposts: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "" }; },
           scrollPage: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "" }; },
-          thumbnail: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "", dataURL: "" }; }
+          thumbnail: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "", dataURL: "" }; },
+          openAppLogin: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "TikTokBridge.js is missing from the app." }; },
+          unrepostTap: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "TikTokBridge.js is missing from the app." }; }
         };
         """
     }
@@ -689,6 +914,8 @@ private enum BridgeCall: String {
     case focusReposts
     case scrollPage
     case thumbnail
+    case openAppLogin
+    case unrepostTap
 }
 
 private enum TikTokURL {
@@ -697,11 +924,27 @@ private enum TikTokURL {
     static let login = URL(string: "https://www.tiktok.com/login?lang=en")!
 
     static func profile(_ uniqueId: String) -> URL? {
-        let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))
-        guard let encoded = uniqueId.addingPercentEncoding(withAllowedCharacters: allowed) else {
-            return nil
-        }
+        guard let encoded = pathEncoded(uniqueId) else { return nil }
         return URL(string: "https://www.tiktok.com/@\(encoded)")
+    }
+
+    static func video(_ uniqueId: String, _ itemId: String) -> URL? {
+        guard itemId.allSatisfy(\.isNumber), let encoded = pathEncoded(uniqueId) else { return nil }
+        return URL(string: "https://www.tiktok.com/@\(encoded)/video/\(itemId)")
+    }
+
+    private static func pathEncoded(_ value: String) -> String? {
+        let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))
+        return value.addingPercentEncoding(withAllowedCharacters: allowed)
+    }
+}
+
+extension TikTokWebSession {
+    enum AppLoginPhase: Equatable {
+        case idle
+        case loading
+        case waiting
+        case failed(String)
     }
 }
 
@@ -742,17 +985,16 @@ extension TikTokWebSession: WKNavigationDelegate {
         Task { @MainActor in
             self.isPageLoading = false
             self.loginProgress = 1
-            guard self.showingLogin else { return }
-            await self.hideLoginPromos()
-            if await self.refreshSessionCookie() {
-                self.adoptSession()
+            if self.expectingHandoff && self.didOpenHandoff == false {
+                if await self.refreshSessionCookie() {
+                    self.adoptSession()
+                    return
+                }
+                await self.triggerAppLogin()
                 return
             }
-            let path = webView.url?.path.lowercased() ?? ""
-            let host = webView.url?.host?.lowercased() ?? ""
-            if host.contains("tiktok.com"), path.contains("login") == false {
-                await self.refreshAccount()
-                if self.account?.uniqueId.isEmpty == false {
+            if await self.refreshSessionCookie() {
+                if self.didAdopt == false || self.appLoginPhase == .waiting {
                     self.adoptSession()
                 }
             }
@@ -777,10 +1019,16 @@ extension TikTokWebSession: WKNavigationDelegate {
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         let scheme = navigationAction.request.url?.scheme?.lowercased() ?? ""
-        if scheme == "http" || scheme == "https" || scheme == "about" {
+        if scheme == "http" || scheme == "https" || scheme == "about" || scheme.isEmpty {
             decisionHandler(.allow)
-        } else {
-            decisionHandler(.cancel)
+            return
+        }
+        let url = navigationAction.request.url
+        decisionHandler(.cancel)
+        if let url {
+            Task { @MainActor in
+                self.handleExternalURL(url)
+            }
         }
     }
 
@@ -790,9 +1038,15 @@ extension TikTokWebSession: WKNavigationDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+        guard let url = navigationAction.request.url else { return nil }
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme == "http" || scheme == "https" {
             Task { @MainActor in
                 self.webView.load(URLRequest(url: url))
+            }
+        } else if scheme.isEmpty == false {
+            Task { @MainActor in
+                self.handleExternalURL(url)
             }
         }
         return nil
@@ -803,9 +1057,18 @@ extension TikTokWebSession: WKNavigationDelegate {
         if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
             return
         }
+        if nsError.domain == "WebKitErrorDomain" && nsError.code == 102 {
+            return
+        }
         Task { @MainActor in
             self.isPageLoading = false
-            self.pageError = "TikTok didn’t load. Check the connection and reload."
+            let host = self.webView.url?.host?.lowercased() ?? ""
+            let loginStillLoading = self.expectingHandoff && self.didOpenHandoff == false && self.appLoginInFlight == false && self.handoffWatch == nil
+            if loginStillLoading && host.contains("tiktok.com") == false {
+                self.failLogin("TikTok’s login page didn’t load. Check the connection and retry.")
+            } else if self.appLoginPhase == .idle {
+                self.pageError = "TikTok didn’t load. Check the connection and reload."
+            }
         }
     }
 }

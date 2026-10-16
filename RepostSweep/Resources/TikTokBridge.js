@@ -1,14 +1,82 @@
 // Repost Sweep page bridge.
-// Runs only inside the signed-in TikTok WKWebView. It never reads password
-// fields and never returns cookies to the app. Listing uses the same repost
-// endpoint the website calls. Removal uses TikTok's unrepost calls only
-// (/tiktok/v1/upvote/delete/ and, if that path is gone, /api/repost/item/delete/).
-// It does not call video-delete endpoints.
+// Runs inside the hidden TikTok WKWebView. It never reads password fields and
+// never returns cookies to the app. Listing uses the repost endpoint the
+// website calls. Removal replays a signed unrepost request when the page has
+// made one, otherwise asks TikTok's own signer, and reports a non-JSON body
+// as NEEDS_FALLBACK instead of treating it as success.
 (function () {
   "use strict";
 
   var LIST_PATH = "/api/repost/item_list/";
   var UNREPOST_PATHS = ["/tiktok/v1/upvote/delete/", "/api/repost/item/delete/"];
+  var APP_LABELS = [
+    "log in with tiktok app",
+    "login with tiktok app",
+    "continue with tiktok app",
+    "open tiktok app",
+    "open the tiktok app",
+    "log in with app",
+    "use tiktok app",
+    "continue in the tiktok app",
+    "continue in tiktok"
+  ];
+
+  function installNetHook() {
+    var hook = window.__repostSweepNetHook;
+    if (!hook) {
+      hook = { lastDelete: null, nativeFetch: null };
+      window.__repostSweepNetHook = hook;
+    }
+    if (typeof window.fetch === "function" && !window.fetch.__rs) {
+      var previous = window.fetch;
+      if (!hook.nativeFetch) {
+        var native = previous;
+        while (native && native.__rsPrev) native = native.__rsPrev;
+        hook.nativeFetch = native;
+      }
+      var wrapped = function (input, init) {
+        try {
+          recordDelete(input, init);
+        } catch (error) {
+          /* capture is best-effort */
+        }
+        return previous.apply(this, arguments);
+      };
+      wrapped.__rs = true;
+      wrapped.__rsPrev = previous;
+      window.fetch = wrapped;
+    }
+    if (!XMLHttpRequest.prototype.__rsSend) {
+      var originalOpen = XMLHttpRequest.prototype.open;
+      var originalSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        this.__rsMethod = method;
+        this.__rsURL = typeof url === "string" ? url : String(url || "");
+        return originalOpen.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function (body) {
+        try {
+          var url = String(this.__rsURL || "");
+          if (!window.__repostSweepReplay && isDeleteURL(url)) {
+            window.__repostSweepNetHook.lastDelete = {
+              url: url,
+              method: String(this.__rsMethod || "POST"),
+              body: bodyToString(body)
+            };
+          }
+        } catch (error) {
+          /* capture is best-effort */
+        }
+        return originalSend.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.__rsSend = true;
+    }
+  }
+
+  if (window.__repostSweep && window.__repostSweep.version >= 2) {
+    installNetHook();
+    return;
+  }
 
   function onTikTok() {
     return /(^|\.)tiktok\.com$/i.test(location.hostname || "");
@@ -46,6 +114,12 @@
     return result;
   }
 
+  function delay(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
+    });
+  }
+
   function cookieValue(name) {
     var parts = (document.cookie || "").split("; ");
     for (var i = 0; i < parts.length; i += 1) {
@@ -62,6 +136,38 @@
     return "";
   }
 
+  function isDeleteURL(url) {
+    return url.indexOf("/upvote/delete") !== -1 || url.indexOf("/repost/item/delete") !== -1;
+  }
+
+  function bodyToString(body) {
+    if (body == null) return "";
+    if (typeof body === "string") return body;
+    if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) return body.toString();
+    return "";
+  }
+
+  function recordDelete(input, init) {
+    if (window.__repostSweepReplay) return;
+    var url = "";
+    var method = "GET";
+    if (typeof input === "string") {
+      url = input;
+    } else if (input && typeof input.url === "string") {
+      url = input.url;
+      method = input.method || method;
+    }
+    if (init && init.method) method = init.method;
+    if (!isDeleteURL(String(url))) return;
+    var body = "";
+    if (init && init.body != null) body = bodyToString(init.body);
+    window.__repostSweepNetHook.lastDelete = {
+      url: String(url),
+      method: String(method),
+      body: body
+    };
+  }
+
   function readHydration() {
     if (window.__UNIVERSAL_DATA_FOR_REHYDRATION__) {
       return window.__UNIVERSAL_DATA_FOR_REHYDRATION__;
@@ -75,26 +181,87 @@
     }
   }
 
+  function isForeignAvatar(url) {
+    var lower = String(url || "").toLowerCase();
+    return (
+      lower.indexOf("googleusercontent") !== -1 ||
+      lower.indexOf("ggpht") !== -1 ||
+      lower.indexOf("google.com") !== -1 ||
+      lower.indexOf("gstatic") !== -1 ||
+      lower.indexOf("fbcdn") !== -1
+    );
+  }
+
+  function prefersTikTokCDN(url) {
+    return /tiktokcdn|byteimg|tiktokv|ibyteimg|muscdn/i.test(String(url || ""));
+  }
+
+  function pushAvatar(list, value) {
+    if (!value) return;
+    if (typeof value === "string" && value) {
+      list.push(value);
+      return;
+    }
+    if (value.url_list && value.url_list[0]) list.push(String(value.url_list[0]));
+    if (value.urlList && value.urlList[0]) list.push(String(value.urlList[0]));
+  }
+
   function avatarOf(user) {
     if (!user) return "";
-    if (typeof user.avatarThumb === "string") return user.avatarThumb;
-    if (user.avatarThumb && user.avatarThumb.url_list && user.avatarThumb.url_list[0]) {
-      return String(user.avatarThumb.url_list[0]);
+    var found = [];
+    pushAvatar(found, user.avatarThumb);
+    pushAvatar(found, user.avatarMedium);
+    pushAvatar(found, user.avatarLarger);
+    pushAvatar(found, user.avatar_thumb);
+    pushAvatar(found, user.avatar_medium);
+    pushAvatar(found, user.avatar_larger);
+    pushAvatar(found, user.avatarUri);
+    pushAvatar(found, user.avatar_url);
+    pushAvatar(found, user.avatarUrl);
+    var clean = [];
+    for (var i = 0; i < found.length; i += 1) {
+      if (!isForeignAvatar(found[i])) clean.push(found[i]);
     }
-    if (typeof user.avatarUri === "string") return user.avatarUri;
-    return "";
+    for (var j = 0; j < clean.length; j += 1) {
+      if (prefersTikTokCDN(clean[j])) return clean[j];
+    }
+    return clean[0] || "";
+  }
+
+  function countOf(source, keys) {
+    if (!source || typeof source !== "object") return 0;
+    for (var i = 0; i < keys.length; i += 1) {
+      if (source[keys[i]] === undefined || source[keys[i]] === null || source[keys[i]] === "") continue;
+      var number = Number(source[keys[i]]);
+      if (isFinite(number) && number >= 0) return Math.round(number);
+    }
+    return 0;
+  }
+
+  function applyStats(account, source) {
+    if (!account || !source) return account;
+    var followers = countOf(source, ["followerCount", "follower_count", "fans"]);
+    var following = countOf(source, ["followingCount", "following_count", "following"]);
+    if (!account.followerCount && followers) account.followerCount = followers;
+    if (!account.followingCount && following) account.followingCount = following;
+    return account;
   }
 
   function mapUser(user) {
     if (!user || typeof user !== "object") return null;
     var uniqueId = user.uniqueId || user.unique_id || "";
     if (!uniqueId) return null;
-    return {
+    var account = {
       uniqueId: String(uniqueId),
-      nickname: String(user.nickname || user.nickName || ""),
-      secUid: String(user.secUid || user.sec_uid || ""),
-      avatarURL: avatarOf(user)
+      nickname: String(user.nickname || user.nickName || user.screen_name || ""),
+      secUid: String(user.secUid || user.sec_uid || user.sec_user_id || ""),
+      avatarURL: avatarOf(user),
+      followerCount: 0,
+      followingCount: 0
     };
+    applyStats(account, user);
+    applyStats(account, user.stats);
+    return account;
   }
 
   function sessionUser() {
@@ -121,7 +288,7 @@
       } catch (error) {
         decoded = match[1];
       }
-      return { uniqueId: decoded, nickname: "", secUid: "", avatarURL: "" };
+      return { uniqueId: decoded, nickname: "", secUid: "", avatarURL: "", followerCount: 0, followingCount: 0 };
     }
     return null;
   }
@@ -131,7 +298,9 @@
     var scope = hydration && hydration.__DEFAULT_SCOPE__;
     var detail = scope && scope["webapp.user-detail"];
     var user = detail && detail.userInfo && detail.userInfo.user;
-    return mapUser(user);
+    var mapped = mapUser(user);
+    if (mapped && detail.userInfo.stats) applyStats(mapped, detail.userInfo.stats);
+    return mapped;
   }
 
   function mergeAccount() {
@@ -142,10 +311,12 @@
       if (profile.uniqueId && path.indexOf("/@" + profile.uniqueId) !== -1) return profile;
       return null;
     }
-    if (session && profile && session.uniqueId === profile.uniqueId && !session.secUid && profile.secUid) {
-      session.secUid = profile.secUid;
+    if (session && profile && session.uniqueId === profile.uniqueId) {
+      if (!session.secUid && profile.secUid) session.secUid = profile.secUid;
       if (!session.nickname) session.nickname = profile.nickname;
       if (!session.avatarURL) session.avatarURL = profile.avatarURL;
+      if (!session.followerCount) session.followerCount = profile.followerCount;
+      if (!session.followingCount) session.followingCount = profile.followingCount;
     }
     return session;
   }
@@ -244,20 +415,42 @@
 
   function remoteAccount(json) {
     var data = json;
-    if (data && data.data && typeof data.data === "object") data = data.data;
-    if (data && data.userInfo && data.userInfo.user) data = data.userInfo.user;
-    else if (data && data.user && typeof data.user === "object") data = data.user;
+    if (data && data.data && typeof data.data === "object" && !data.uniqueId && !data.unique_id) data = data.data;
+    var userInfo = data && data.userInfo;
+    if (userInfo && userInfo.user) {
+      var fromInfo = mapUser(userInfo.user);
+      if (fromInfo) applyStats(fromInfo, userInfo.stats);
+      return fromInfo;
+    }
+    if (data && data.user && typeof data.user === "object") data = data.user;
     if (!data || typeof data !== "object") return null;
-    var uniqueId = String(data.uniqueId || data.unique_id || data.username || "");
+    var mapped = mapUser(data);
+    if (mapped) return mapped;
+    var uniqueId = String(data.username || "");
     if (!uniqueId || /^\d+$/.test(uniqueId)) return null;
-    var avatar = data.avatar_url || data.avatarUrl || "";
-    if (!avatar) avatar = avatarOf(data);
-    return {
+    var account = {
       uniqueId: uniqueId,
-      nickname: String(data.screen_name || data.nickname || data.nickName || ""),
+      nickname: String(data.screen_name || data.nickname || ""),
       secUid: String(data.sec_user_id || data.secUid || data.sec_uid || ""),
-      avatarURL: String(avatar || "")
+      avatarURL: avatarOf(data),
+      followerCount: 0,
+      followingCount: 0
     };
+    applyStats(account, data);
+    return account;
+  }
+
+  function fillAccount(base, extra) {
+    if (!extra) return base;
+    if (!base) return extra;
+    if (extra.uniqueId && base.uniqueId && extra.uniqueId !== base.uniqueId) return base;
+    if (!base.uniqueId) base.uniqueId = extra.uniqueId;
+    if (!base.nickname) base.nickname = extra.nickname;
+    if (!base.secUid) base.secUid = extra.secUid;
+    if (!base.avatarURL) base.avatarURL = extra.avatarURL;
+    if (!base.followerCount) base.followerCount = extra.followerCount || 0;
+    if (!base.followingCount) base.followingCount = extra.followingCount || 0;
+    return base;
   }
 
   async function fetchSelf() {
@@ -275,14 +468,20 @@
     }
   }
 
-  function fillAccount(base, extra) {
-    if (!extra) return base;
-    if (!base) return extra;
-    if (!base.uniqueId) base.uniqueId = extra.uniqueId;
-    if (!base.nickname) base.nickname = extra.nickname;
-    if (!base.secUid) base.secUid = extra.secUid;
-    if (!base.avatarURL) base.avatarURL = extra.avatarURL;
-    return base;
+  async function fetchUserDetail(uniqueId) {
+    if (!uniqueId) return null;
+    try {
+      var response = await fetch("/api/user/detail/?aid=1988&uniqueId=" + encodeURIComponent(uniqueId), {
+        method: "GET",
+        credentials: "include",
+        headers: { accept: "application/json, text/plain, */*" }
+      });
+      if (!response.ok) return null;
+      var json = await response.json();
+      return remoteAccount(json);
+    } catch (error) {
+      return null;
+    }
   }
 
   async function detect() {
@@ -290,6 +489,9 @@
     var account = mergeAccount();
     if (!account || !account.uniqueId || !account.secUid || !account.avatarURL) {
       account = fillAccount(account, await fetchSelf());
+    }
+    if (account && account.uniqueId && (!account.secUid || !account.avatarURL || !account.followerCount || !account.followingCount)) {
+      account = fillAccount(account, await fetchUserDetail(account.uniqueId));
     }
     if (!account || !account.uniqueId) return fail("NOT_LOGGED_IN", "TikTok doesn’t show a signed-in account yet.");
     return succeed({ account: account });
@@ -304,7 +506,7 @@
     var supplied = String(input.secUid || "");
     if (supplied && (!account || !account.secUid)) {
       if (!account) {
-        account = { uniqueId: "", nickname: "", secUid: supplied, avatarURL: "" };
+        account = { uniqueId: "", nickname: "", secUid: supplied, avatarURL: "", followerCount: 0, followingCount: 0 };
       } else {
         account.secUid = supplied;
       }
@@ -373,64 +575,191 @@
     return headers;
   }
 
-  async function postUnrepost(path, itemId) {
-    var params = new URLSearchParams();
-    params.set("aid", "1988");
-    params.set("app_name", "tiktok_web");
-    var token = cookieValue("msToken");
-    if (token) params.set("msToken", token);
-    var body = new URLSearchParams();
-    body.set("item_id", itemId);
-    body.set("aweme_id", itemId);
-    var response = await fetch(path + "?" + params.toString(), {
-      method: "POST",
-      credentials: "include",
-      headers: csrfHeaders(),
-      body: body.toString()
+  function snippet(text) {
+    return String(text || "").replace(/\s+/g, " ").trim().slice(0, 500);
+  }
+
+  function cleanDeleteURL(raw) {
+    var parsed = new URL(raw, location.origin);
+    ["X-Bogus", "x-bogus", "X-Gnarly", "x-gnarly", "_signature"].forEach(function (key) {
+      parsed.searchParams.delete(key);
     });
-    var text = await response.text();
-    return { response: response, text: text };
+    var token = cookieValue("msToken");
+    if (token) parsed.searchParams.set("msToken", token);
+    return parsed.pathname + parsed.search;
+  }
+
+  function bodyForItem(body, itemId) {
+    var text = body == null ? "" : String(body);
+    if (!text) {
+      var fresh = new URLSearchParams();
+      fresh.set("item_id", itemId);
+      fresh.set("aweme_id", itemId);
+      return fresh.toString();
+    }
+    if (text.charAt(0) === "{") {
+      try {
+        var json = JSON.parse(text);
+        ["item_id", "aweme_id", "itemId", "awemeId"].forEach(function (key) {
+          if (Object.prototype.hasOwnProperty.call(json, key)) json[key] = itemId;
+        });
+        return JSON.stringify(json);
+      } catch (error) {
+        /* fall through to form encoding */
+      }
+    }
+    var params = new URLSearchParams(text);
+    var touched = false;
+    ["item_id", "aweme_id", "itemId", "awemeId"].forEach(function (key) {
+      if (params.has(key)) {
+        params.set(key, itemId);
+        touched = true;
+      }
+    });
+    if (!touched) {
+      params.set("item_id", itemId);
+      params.set("aweme_id", itemId);
+    }
+    return params.toString();
+  }
+
+  async function signURL(raw) {
+    var crawler = window.byted_acrawler;
+    if (!crawler) return "";
+    var absolute = raw;
+    try {
+      absolute = new URL(raw, location.origin).toString();
+    } catch (error) {
+      absolute = raw;
+    }
+    var signed = null;
+    try {
+      if (typeof crawler.frontierSign === "function") {
+        signed = await crawler.frontierSign({ url: absolute });
+      }
+      if (!signed && typeof crawler.sign === "function") {
+        signed = await crawler.sign({ url: absolute });
+      }
+    } catch (error) {
+      return "";
+    }
+    if (!signed) return "";
+    if (typeof signed === "string") return signed;
+    if (typeof signed.url === "string") return signed.url;
+    var bogus = signed["X-Bogus"] || signed["x-bogus"];
+    var gnarly = signed["X-Gnarly"] || signed["x-gnarly"];
+    if (!bogus && !gnarly) return "";
+    try {
+      var parsed = new URL(absolute);
+      if (bogus) parsed.searchParams.set("X-Bogus", String(bogus));
+      if (gnarly) parsed.searchParams.set("X-Gnarly", String(gnarly));
+      return parsed.toString();
+    } catch (error) {
+      return "";
+    }
+  }
+
+  async function sendDelete(url, body) {
+    var signed = await signURL(url);
+    var finalURL = signed || url;
+    var hook = window.__repostSweepNetHook;
+    var useNative = Boolean(signed && hook && typeof hook.nativeFetch === "function");
+    var fetcher = useNative ? hook.nativeFetch : window.fetch;
+    window.__repostSweepReplay = true;
+    try {
+      var response = await fetcher.call(window, finalURL, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders(),
+        body: body
+      });
+      var text = "";
+      try {
+        text = await response.text();
+      } catch (error) {
+        text = "";
+      }
+      return { status: response.status, text: text };
+    } finally {
+      window.__repostSweepReplay = false;
+    }
+  }
+
+  function interpretUnrepost(httpStatus, text) {
+    if (httpStatus === 404 || httpStatus === 405) {
+      return { kind: "next", message: "http " + httpStatus };
+    }
+    if (!text) {
+      return { kind: "fallback", message: "Unrepost response was empty (http " + httpStatus + ")." };
+    }
+    var json;
+    try {
+      json = JSON.parse(text);
+    } catch (error) {
+      return {
+        kind: "fallback",
+        message: "Unrepost response was not JSON (http " + httpStatus + "). " + snippet(text)
+      };
+    }
+    var status = statusOf(json);
+    var kind = classify(httpStatus, status === null ? -1 : status);
+    if (kind === "OK") return { kind: "ok", message: "" };
+    if (kind === "RATE_LIMITED") return { kind: "rate", message: "status " + status };
+    if (kind === "NOT_LOGGED_IN") return { kind: "auth", message: "status " + status };
+    return {
+      kind: "fallback",
+      message: "Unrepost status " + status + " http " + httpStatus + ". " + snippet(text)
+    };
+  }
+
+  function outcomeFrom(read) {
+    if (!read) return null;
+    if (read.kind === "ok") return succeed({});
+    if (read.kind === "rate") return fail("RATE_LIMITED", read.message);
+    if (read.kind === "auth") return fail("NOT_LOGGED_IN", read.message);
+    return null;
   }
 
   async function remove(payload) {
+    installNetHook();
     var input = payload || {};
     var itemId = String(input.itemId || "");
     if (!/^\d{6,}$/.test(itemId)) return fail("PARSE", "That repost id doesn’t look usable.");
     if (!onTikTok()) return fail("NOT_ON_TIKTOK", "Open TikTok and sign in.");
 
-    var last = "no attempt";
-    for (var i = 0; i < UNREPOST_PATHS.length; i += 1) {
-      var outcome;
+    var fallback = "";
+    var hook = window.__repostSweepNetHook;
+    if (hook && hook.lastDelete && hook.lastDelete.url) {
       try {
-        outcome = await postUnrepost(UNREPOST_PATHS[i], itemId);
+        var replayed = await sendDelete(cleanDeleteURL(hook.lastDelete.url), bodyForItem(hook.lastDelete.body, itemId));
+        var replayRead = interpretUnrepost(replayed.status, replayed.text);
+        var replayDone = outcomeFrom(replayRead);
+        if (replayDone) return replayDone;
+        if (replayRead.kind === "fallback") fallback = replayRead.message;
       } catch (error) {
-        return fail("NETWORK", "The unrepost request didn’t finish.");
+        fallback = "The signed unrepost replay didn’t finish.";
       }
-      var text = outcome.text || "";
-      var httpStatus = outcome.response.status;
-      if (httpStatus === 404 || httpStatus === 405) {
-        last = "http " + httpStatus;
-        continue;
-      }
-      if (!text) {
-        if (httpStatus >= 200 && httpStatus < 300) return succeed({});
-        last = "empty http " + httpStatus;
-        continue;
-      }
-      var json;
-      try {
-        json = JSON.parse(text);
-      } catch (error) {
-        return fail("ENDPOINT_CHANGED", "Unrepost response was not JSON (http " + httpStatus + ").");
-      }
-      var status = statusOf(json);
-      var kind = classify(httpStatus, status === null ? -1 : status);
-      if (kind === "OK") return succeed({});
-      if (kind === "RATE_LIMITED") return fail("RATE_LIMITED", "status " + status);
-      if (kind === "NOT_LOGGED_IN") return fail("NOT_LOGGED_IN", "status " + status);
-      last = "status " + status + " http " + httpStatus;
     }
-    return fail("ENDPOINT_CHANGED", "Unrepost " + last + ".");
+
+    for (var i = 0; i < UNREPOST_PATHS.length; i += 1) {
+      var params = new URLSearchParams();
+      params.set("aid", "1988");
+      params.set("app_name", "tiktok_web");
+      var token = cookieValue("msToken");
+      if (token) params.set("msToken", token);
+      var sent;
+      try {
+        sent = await sendDelete(UNREPOST_PATHS[i] + "?" + params.toString(), bodyForItem("", itemId));
+      } catch (error) {
+        fallback = fallback || "The unrepost request didn’t finish.";
+        continue;
+      }
+      var read = interpretUnrepost(sent.status, sent.text);
+      var done = outcomeFrom(read);
+      if (done) return done;
+      if (read && read.message) fallback = read.message;
+    }
+    return fail("NEEDS_FALLBACK", fallback || "Unrepost did not return JSON.");
   }
 
   function listFromDom() {
@@ -485,6 +814,209 @@
     return succeed({});
   }
 
+  function isVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    var rect = el.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return false;
+    var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    if (!style) return true;
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    return true;
+  }
+
+  function controlText(el) {
+    if (!el) return "";
+    var aria = el.getAttribute("aria-label") || "";
+    var text = el.innerText || el.textContent || "";
+    return (aria + " " + text).replace(/\s+/g, " ").trim();
+  }
+
+  function handoffHref(el) {
+    if (!el || !el.getAttribute) return "";
+    var href = (el.getAttribute("href") || el.getAttribute("data-href") || "").trim();
+    var lower = href.toLowerCase();
+    if (lower.indexOf("tiktok://") === 0 || lower.indexOf("snssdk1233://") === 0 || lower.indexOf("snssdk1128://") === 0) {
+      return href;
+    }
+    return "";
+  }
+
+  function isForeignLogin(text) {
+    return /google|facebook|apple|e-?mail|phone|qr code|username/.test(text);
+  }
+
+  function appLoginScore(text) {
+    var lower = String(text || "").toLowerCase();
+    if (!lower || isForeignLogin(lower)) return 0;
+    var best = 0;
+    for (var i = 0; i < APP_LABELS.length; i += 1) {
+      if (lower.indexOf(APP_LABELS[i]) !== -1) best = Math.max(best, APP_LABELS[i].length);
+    }
+    return best;
+  }
+
+  function scanLogin() {
+    var nodes = document.querySelectorAll("a, button, div[role='button'], span[role='button'], [data-e2e]");
+    var labels = [];
+    var seen = {};
+    var visibleHref = null;
+    var hiddenHref = null;
+    var labelEl = null;
+    var labelScore = 0;
+    for (var i = 0; i < nodes.length; i += 1) {
+      var el = nodes[i];
+      var href = handoffHref(el);
+      var visible = isVisible(el);
+      if (href && visible && !visibleHref) visibleHref = href;
+      if (href && !visible && !hiddenHref) hiddenHref = href;
+      if (!visible) continue;
+      var text = controlText(el).slice(0, 80);
+      if (text && !seen[text]) {
+        seen[text] = true;
+        labels.push(text);
+      }
+      var score = appLoginScore(text);
+      if (score > labelScore) {
+        labelScore = score;
+        labelEl = el;
+      }
+    }
+    return {
+      visibleHref: visibleHref,
+      hiddenHref: hiddenHref,
+      labelEl: labelEl,
+      labels: labels.slice(0, 12)
+    };
+  }
+
+  function activate(el) {
+    var target = el.closest ? (el.closest("a, button") || el) : el;
+    if (typeof target.click === "function") target.click();
+  }
+
+  async function openAppLogin() {
+    if (!onTikTok()) return fail("NOT_ON_TIKTOK", "TikTok’s login page didn’t load.");
+    var deadline = Date.now() + 12000;
+    var lastLabels = [];
+    while (Date.now() < deadline) {
+      var found = scanLogin();
+      lastLabels = found.labels;
+      if (found.visibleHref) {
+        location.href = found.visibleHref;
+        return succeed({ message: "Opened " + found.visibleHref.slice(0, 140) });
+      }
+      if (found.labelEl) {
+        var label = controlText(found.labelEl).slice(0, 80);
+        activate(found.labelEl);
+        var until = Date.now() + 1800;
+        while (Date.now() < until) {
+          await delay(200);
+          var again = scanLogin();
+          var nextHref = again.visibleHref || again.hiddenHref;
+          if (nextHref) {
+            location.href = nextHref;
+            return succeed({ message: "Opened " + nextHref.slice(0, 140) });
+          }
+        }
+        return succeed({ message: "Tapped “" + label + "”." });
+      }
+      if (found.hiddenHref) {
+        location.href = found.hiddenHref;
+        return succeed({ message: "Opened " + found.hiddenHref.slice(0, 140) });
+      }
+      await delay(350);
+    }
+    var listed = lastLabels.length ? lastLabels.join(" | ") : "(none)";
+    return fail(
+      "NO_APP_LOGIN",
+      "TikTok’s login page didn’t show Log in with TikTok app. Visible labels: " + listed
+    );
+  }
+
+  function isRemoveRepost(el) {
+    var e2e = (el.getAttribute("data-e2e") || "").toLowerCase();
+    if (
+      e2e === "share-remove-repost" ||
+      e2e === "video-share-remove-repost" ||
+      e2e === "browse-remove-repost" ||
+      e2e.indexOf("remove-repost") !== -1
+    ) {
+      return true;
+    }
+    var text = controlText(el).toLowerCase();
+    if (!text || text === "repost" || text === "reposts") return false;
+    if (text.indexOf("remove repost") !== -1) return true;
+    if (text.indexOf("unrepost") !== -1) return true;
+    if (text.indexOf("remove from repost") !== -1) return true;
+    return false;
+  }
+
+  function findRemoveControl() {
+    var nodes = document.querySelectorAll("button, a, div[role='button'], [data-e2e]");
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (!isVisible(nodes[i])) continue;
+      if (isRemoveRepost(nodes[i])) return nodes[i];
+    }
+    return null;
+  }
+
+  function findShare() {
+    var selectors = [
+      '[data-e2e="browse-share"]',
+      '[data-e2e="share-icon"]',
+      '[data-e2e="video-share-icon"]',
+      'button[aria-label="Share"]',
+      '[aria-label="Share"]',
+      '[aria-label="Share video"]'
+    ];
+    for (var i = 0; i < selectors.length; i += 1) {
+      var el = document.querySelector(selectors[i]);
+      if (el && isVisible(el)) return el;
+    }
+    var nodes = document.querySelectorAll("button, a, div[role='button']");
+    for (var j = 0; j < nodes.length; j += 1) {
+      if (!isVisible(nodes[j])) continue;
+      var text = controlText(nodes[j]).toLowerCase();
+      if (text === "share" || text.indexOf("share video") !== -1) return nodes[j];
+    }
+    return null;
+  }
+
+  function removedToast() {
+    var nodes = document.querySelectorAll('[role="alert"], [role="status"], [class*="Toast"], [class*="toast"]');
+    for (var i = 0; i < nodes.length; i += 1) {
+      var text = controlText(nodes[i]).toLowerCase();
+      if (text.indexOf("removed") !== -1 || text.indexOf("unreposted") !== -1) return true;
+    }
+    return false;
+  }
+
+  async function unrepostTap() {
+    if (!onTikTok()) return fail("NOT_ON_TIKTOK", "The video page isn’t on TikTok.");
+    var control = findRemoveControl();
+    if (!control) {
+      var share = findShare();
+      if (!share) return fail("UI_CHANGED", "Couldn’t find the share menu or a Remove repost control.");
+      activate(share);
+      await delay(600);
+      control = findRemoveControl();
+    }
+    if (!control) return fail("UI_CHANGED", "The share menu opened, but Remove repost wasn’t there.");
+    activate(control);
+    var gone = 0;
+    for (var i = 0; i < 10; i += 1) {
+      await delay(400);
+      if (removedToast()) return succeed({ message: "Remove repost confirmed." });
+      if (findRemoveControl()) {
+        gone = 0;
+      } else {
+        gone += 1;
+        if (gone >= 2) return succeed({ message: "Remove repost control is gone." });
+      }
+    }
+    return fail("UI_CHANGED", "Tapped Remove repost, but the control didn’t flip.");
+  }
+
   async function thumbnail(payload) {
     var input = payload || {};
     var url = String(input.coverURL || "");
@@ -516,13 +1048,16 @@
     }
   }
 
+  installNetHook();
   window.__repostSweep = {
-    version: 1,
+    version: 2,
     detect: detect,
     list: list,
     remove: remove,
     focusReposts: focusReposts,
     scrollPage: scrollPage,
-    thumbnail: thumbnail
+    thumbnail: thumbnail,
+    openAppLogin: openAppLogin,
+    unrepostTap: unrepostTap
   };
 })();

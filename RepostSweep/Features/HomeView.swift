@@ -75,6 +75,9 @@ struct HomeView: View {
                             session.beginLogin()
                         }
                     }
+                    if session.debugDetail.isEmpty == false {
+                        debugDetail
+                    }
                     if session.reposts.isEmpty == false {
                         listHeader
                         LazyVStack(spacing: 8) {
@@ -307,6 +310,12 @@ struct HomeView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(Theme.muted)
                         .lineLimit(1)
+                    if let stats = session.account?.statsLine {
+                        Text(stats)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.muted)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 8)
                 Button("Log out") {
@@ -341,16 +350,43 @@ struct HomeView: View {
 
     private var signedOutCard: some View {
         SurfaceCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Log in on TikTok’s page")
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Continue with TikTok")
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .foregroundStyle(Theme.ink)
                 Text(LegalCopy.password)
                     .font(.subheadline)
                     .foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
+                loginControl
             }
         }
+    }
+
+    private var loginControl: some View {
+        TikTokLoginControl(phase: session.appLoginPhase) {
+            session.beginLogin()
+        } onCancel: {
+            session.cancelLogin()
+        }
+    }
+
+    private var debugDetail: some View {
+        DisclosureGroup {
+            Text(session.debugDetail)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Theme.muted)
+                .textSelection(.enabled)
+                .padding(.top, 6)
+        } label: {
+            Text("Detail")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var listHeader: some View {
@@ -402,9 +438,7 @@ struct HomeView: View {
     private var actionBar: some View {
         VStack(spacing: 8) {
             if signedIn == false {
-                PrimaryButton(title: "Log in to TikTok", systemImage: "person.fill") {
-                    session.beginLogin()
-                }
+                loginControl
             } else if runner.isRunning {
                 HStack(spacing: 10) {
                     QuietButton(title: runner.isPaused ? "Resume" : "Pause") {

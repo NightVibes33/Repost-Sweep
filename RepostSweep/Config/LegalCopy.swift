@@ -11,7 +11,7 @@ struct PrivacySection: Identifiable {
 enum LegalCopy {
     static let notAffiliated = "Repost Sweep is not affiliated with, endorsed by, or sponsored by TikTok or ByteDance."
 
-    static let password = "You sign in on TikTok’s own website inside this app. Repost Sweep never receives, reads, or stores your password."
+    static let password = "You continue in the TikTok app. Repost Sweep never receives, reads, or stores your password."
 
     static let session = "The sign-in session stays in the in-app browser on this device. Signing out clears that browser’s website data. Cookies are not copied out of it."
 
