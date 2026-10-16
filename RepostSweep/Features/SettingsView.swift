@@ -5,9 +5,11 @@ struct SettingsView: View {
     @EnvironmentObject private var purchases: PurchaseManager
     @Environment(\.dismiss) private var dismiss
 
+    @AppStorage("didFinishOnboarding") private var didFinishOnboarding = true
     @State private var confirmSignOut = false
     @State private var showPrivacy = false
     @State private var showPaywall = false
+    @State private var replayOnboarding = false
 
     var body: some View {
         NavigationStack {
@@ -96,6 +98,11 @@ struct SettingsView: View {
                         }
                     }
 
+                    QuietButton(title: "Show onboarding") {
+                        replayOnboarding = true
+                        dismiss()
+                    }
+
                     QuietButton(title: "Privacy") {
                         showPrivacy = true
                     }
@@ -122,6 +129,11 @@ struct SettingsView: View {
             }
             .toolbarBackground(Theme.canvas, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .onDisappear {
+                if replayOnboarding {
+                    didFinishOnboarding = false
+                }
+            }
             .navigationDestination(isPresented: $showPrivacy) {
                 PrivacyView()
             }

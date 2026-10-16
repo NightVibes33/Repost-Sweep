@@ -5,16 +5,19 @@ struct OnboardingView: View {
 
     @State private var page = 0
 
-    private let pages: [(title: String, body: String)] = [
+    private let pages: [(symbol: String, title: String, body: String)] = [
         (
+            "arrow.triangle.2.circlepath",
             "Sweep the\nrepost tab.",
             "See what you reposted and take it off your tab in one pass."
         ),
         (
+            "checkmark.circle.fill",
             "You choose\nwhat goes.",
             "Original videos stay up. A removal only drops a video from your reposts."
         ),
         (
+            "infinity",
             "Ten free.\nThen unlimited.",
             "A weekly or yearly plan removes the cap. This app is not affiliated with TikTok."
         )
@@ -23,32 +26,19 @@ struct OnboardingView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                MarkView(size: 32)
+                MarkView(size: 28)
                 Text("Repost Sweep")
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.ink)
                 Spacer()
             }
             .padding(.horizontal, 24)
-            .padding(.top, 16)
+            .padding(.top, 12)
 
             TabView(selection: $page) {
                 ForEach(pages.indices, id: \.self) { index in
-                    VStack(alignment: .leading, spacing: 16) {
-                        Spacer(minLength: 12)
-                        Text(pages[index].title)
-                            .font(.system(size: 42, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.ink)
-                            .minimumScaleFactor(0.7)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(pages[index].body)
-                            .font(.system(size: 18, weight: .regular))
-                            .foregroundStyle(Theme.muted)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 24)
-                    .tag(index)
+                    pageView(pages[index])
+                        .tag(index)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
@@ -86,18 +76,49 @@ struct OnboardingView: View {
             ZStack {
                 Theme.canvas
                 Circle()
-                    .fill(Theme.pink.opacity(0.45))
-                    .frame(width: 220, height: 220)
+                    .fill(Theme.pink.opacity(0.42))
+                    .frame(width: 260, height: 260)
                     .blur(radius: 90)
-                    .offset(x: 120, y: -180)
+                    .offset(x: 130, y: -220)
                 Circle()
                     .fill(Theme.cyan.opacity(0.28))
-                    .frame(width: 180, height: 180)
+                    .frame(width: 200, height: 200)
                     .blur(radius: 80)
-                    .offset(x: -140, y: -40)
+                    .offset(x: -150, y: 20)
             }
             .ignoresSafeArea()
         }
         .readableColumn()
+    }
+
+    private func pageView(_ page: (symbol: String, title: String, body: String)) -> some View {
+        VStack(spacing: 22) {
+            Spacer(minLength: 8)
+            ZStack {
+                Circle()
+                    .fill(Theme.brand)
+                    .frame(width: 132, height: 132)
+                Circle()
+                    .fill(Color.black)
+                    .frame(width: 118, height: 118)
+                Image(systemName: page.symbol)
+                    .font(.system(size: 48, weight: .bold))
+                    .foregroundStyle(Theme.brand)
+            }
+            .accessibilityHidden(true)
+            Text(page.title)
+                .font(.system(size: 40, weight: .bold, design: .rounded))
+                .foregroundStyle(Theme.ink)
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.7)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(page.body)
+                .font(.system(size: 17, weight: .regular))
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(.horizontal, 28)
     }
 }

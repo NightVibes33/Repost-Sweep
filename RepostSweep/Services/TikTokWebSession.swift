@@ -42,6 +42,8 @@ final class TikTokWebSession: NSObject, ObservableObject {
     private var didLeaveApp = false
     private var appLoginInFlight = false
     private var lastBlockedURL = ""
+    private var lastHandoffReport = ""
+    private var didReloadForReturn = false
     private var handoffWatch: Task<Void, Never>?
     private var returnWatch: Task<Void, Never>?
     private var loadingWatch: Task<Void, Never>?
@@ -267,13 +269,43 @@ final class TikTokWebSession: NSObject, ObservableObject {
         await ensureHomePage()
         guard token == generation else { return .notLoggedIn }
         let api = await apiRemoval(itemId)
-        switch api {
-        case .removed, .rateLimited, .notLoggedIn:
-            return api
-        case .siteChanged(let detail), .failed(let detail):
-            noteDebug(detail)
-            guard token == generation else { return .notLoggedIn }
-            return await uiRemoval(itemId: itemId, prior: detail)
+        if case .rateLimited = api { return api }
+        if case .notLoggedIn = api { return api }
+        switch await confirmRemoved(itemId) {
+        case .gone:
+            return .removed
+        case .blocked(let attempt):
+            return attempt
+        case .stillThere:
+            break
+        }
+        guard token == generation else { return .notLoggedIn }
+        let tapped = await uiRemoval(itemId: itemId, prior: attemptDetail(api))
+        if case .rateLimited = tapped { return tapped }
+        if case .notLoggedIn = tapped { return tapped }
+        switch await confirmRemoved(itemId) {
+        case .gone:
+            return .removed
+        case .blocked(let attempt):
+            return attempt
+        case .stillThere:
+            break
+        }
+        let prior = attemptDetail(tapped)
+        let fallback = prior.isEmpty ? attemptDetail(api) : prior
+        return .failed(fallback.isEmpty ? "Still on the repost list after both attempts." : "Still on the repost list. \(fallback)")
+    }
+
+    private func attemptDetail(_ attempt: RemovalAttempt) -> String {
+        switch attempt {
+        case .failed(let detail), .siteChanged(let detail):
+            return detail
+        case .removed:
+            return ""
+        case .rateLimited:
+            return "RATE_LIMITED"
+        case .notLoggedIn:
+            return "NOT_LOGGED_IN"
         }
     }
 
@@ -352,6 +384,8 @@ final class TikTokWebSession: NSObject, ObservableObject {
         didLeaveApp = false
         appLoginInFlight = false
         lastBlockedURL = ""
+        lastHandoffReport = ""
+        didReloadForReturn = false
         foregroundAccumulated = 0
         foregroundSliceStart = nil
         pageError = nil
@@ -473,9 +507,12 @@ final class TikTokWebSession: NSObject, ObservableObject {
                     return
                 }
                 if self.foregroundElapsed() > 45 {
-                    let message = self.didLeaveApp
+                    var message = self.didLeaveApp
                         ? "Returned from TikTok, but no session cookie (sessionid, sessionid_ss, or sid_tt) was set."
                         : "TikTok’s app link was opened, but this app stayed in the foreground and no session cookie (sessionid, sessionid_ss, or sid_tt) was set."
+                    if self.lastHandoffReport.isEmpty == false {
+                        message += " " + self.lastHandoffReport
+                    }
                     self.failLogin(message)
                     return
                 }
@@ -493,15 +530,54 @@ final class TikTokWebSession: NSObject, ObservableObject {
         return total
     }
 
-    private func appBecameActive() {
+    func sceneBecameActive() {
         guard appLoginPhase == .waiting else { return }
         if foregroundSliceStart == nil {
             foregroundSliceStart = Date()
         }
-        Task { @MainActor in
-            if await self.refreshSessionCookie() {
-                self.adoptSession()
-            }
+        Task { await self.finishLoginOnReturn() }
+    }
+
+    func handleAuthCallback(_ url: URL) {
+        guard url.scheme?.lowercased() == "repostsweep" else { return }
+        guard appLoginPhase == .waiting || expectingHandoff else {
+            noteDebug("Ignored \(url.absoluteString) because sign-in was not waiting.")
+            return
+        }
+        expectingHandoff = false
+        didOpenHandoff = true
+        didLeaveApp = true
+        appLoginPhase = .waiting
+        handoffWatch?.cancel()
+        loadingWatch?.cancel()
+        if returnWatch == nil {
+            beginReturnWatch()
+        }
+        noteDebug("TikTok returned to \(url.absoluteString)")
+        Task { await self.finishLoginOnReturn() }
+    }
+
+    private func appBecameActive() {
+        sceneBecameActive()
+    }
+
+    private func finishLoginOnReturn() async {
+        let token = loginGeneration
+        guard appLoginPhase == .waiting else { return }
+        if await refreshSessionCookie() {
+            adoptSession()
+            return
+        }
+        guard token == loginGeneration, appLoginPhase == .waiting else { return }
+        if didReloadForReturn == false {
+            didReloadForReturn = true
+            webView.customUserAgent = TikTokURL.mobileSafari
+            webView.load(URLRequest(url: TikTokURL.home))
+            await waitForSettle()
+        }
+        guard token == loginGeneration, appLoginPhase == .waiting else { return }
+        if await refreshSessionCookie() {
+            adoptSession()
         }
     }
 
@@ -524,17 +600,20 @@ final class TikTokWebSession: NSObject, ObservableObject {
         }
         guard didOpenHandoff == false else { return }
         let token = loginGeneration
+        let rewritten = rewriteReturnURL(url)
+        lastHandoffReport = rewritten.report
+        noteDebug(rewritten.report)
         didOpenHandoff = true
         expectingHandoff = false
         handoffWatch?.cancel()
         loadingWatch?.cancel()
         appLoginPhase = .waiting
         beginReturnWatch()
-        UIApplication.shared.open(url, options: [:]) { success in
+        UIApplication.shared.open(rewritten.url, options: [:]) { success in
             Task { @MainActor in
                 guard token == self.loginGeneration, self.appLoginPhase == .waiting else { return }
                 guard success == false else { return }
-                if UIApplication.shared.canOpenURL(url) == false {
+                if UIApplication.shared.canOpenURL(rewritten.url) == false {
                     self.failLogin("The TikTok app isn’t installed, so \(scheme):// could not be opened.")
                 } else {
                     self.failLogin("iOS could not open \(scheme)://.")
@@ -543,13 +622,49 @@ final class TikTokWebSession: NSObject, ObservableObject {
         }
     }
 
+    private func rewriteReturnURL(_ url: URL) -> (url: URL, report: String) {
+        let returnKeys: Set<String> = [
+            "redirect_url", "redirect_uri", "redirect", "return_url", "returnurl",
+            "next", "callback", "callback_url", "fallback_url", "web_url", "params_url"
+        ]
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return (url, "Handoff URL could not be parsed. No query parameters were readable.")
+        }
+        let items = components.queryItems ?? []
+        var notes: [String] = []
+        var rewrote: [String] = []
+        var updated = items
+        for index in updated.indices {
+            let name = updated[index].name
+            let value = updated[index].value ?? ""
+            let decoded = value.removingPercentEncoding ?? value
+            let web = decoded.hasPrefix("http://") || decoded.hasPrefix("https://")
+            if web && decoded.lowercased().contains("tiktok.com") {
+                notes.append("\(name) (tiktok.com URL)")
+            } else if name.isEmpty == false {
+                notes.append(name)
+            }
+            guard returnKeys.contains(name.lowercased()), web else { continue }
+            updated[index].value = "repostsweep://auth-callback"
+            rewrote.append(name)
+        }
+        components.queryItems = updated.isEmpty ? nil : updated
+        let rebuilt = components.url ?? url
+        let listed = notes.isEmpty ? "(no query parameters)" : notes.joined(separator: ", ")
+        let report: String
+        if rewrote.isEmpty {
+            report = "Handoff parameters: \(listed). None was a web return field this app could rewrite (redirect_url, next, return_url, and similar), so TikTok may only send you back to tiktok.com."
+        } else {
+            report = "Handoff parameters: \(listed). Rewrote \(rewrote.joined(separator: ", ")) to repostsweep://auth-callback."
+        }
+        return (rebuilt, report)
+    }
+
     private func apiRemoval(_ itemId: String) async -> RemovalAttempt {
         do {
             let envelope = try await invoke(.remove, payload: ["itemId": itemId])
-            if envelope.ok {
-                return .removed
-            }
             let detail = envelope.message.isEmpty ? envelope.code : "\(envelope.code). \(envelope.message)"
+            noteDebug(detail)
             switch envelope.code {
             case "RATE_LIMITED":
                 return .rateLimited
@@ -559,7 +674,40 @@ final class TikTokWebSession: NSObject, ObservableObject {
                 return .failed(detail)
             }
         } catch {
-            return .failed("The page didn’t answer.")
+            let detail = "The unrepost request didn’t answer."
+            noteDebug(detail)
+            return .failed(detail)
+        }
+    }
+
+    private enum VerifyResult {
+        case gone
+        case stillThere
+        case blocked(RemovalAttempt)
+    }
+
+    private func confirmRemoved(_ itemId: String) async -> VerifyResult {
+        do {
+            let envelope = try await invoke(.confirmRemoved, payload: [
+                "itemId": itemId,
+                "secUid": account?.secUid ?? ""
+            ])
+            let detail = envelope.message.isEmpty ? envelope.code : envelope.message
+            noteDebug(detail)
+            if envelope.ok {
+                return .gone
+            }
+            switch envelope.code {
+            case "RATE_LIMITED":
+                return .blocked(.rateLimited)
+            case "NOT_LOGGED_IN":
+                return .blocked(.notLoggedIn)
+            default:
+                return .stillThere
+            }
+        } catch {
+            noteDebug("Couldn’t re-check the repost list.")
+            return .stillThere
         }
     }
 
@@ -576,11 +724,11 @@ final class TikTokWebSession: NSObject, ObservableObject {
         guard token == generation else { return .notLoggedIn }
         do {
             let envelope = try await invoke(.unrepostTap, payload: ["itemId": itemId])
-            if envelope.ok {
-                return .removed
-            }
             let detail = envelope.message.isEmpty ? envelope.code : envelope.message
             noteDebug(detail)
+            if envelope.code == "NOT_LOGGED_IN" {
+                return .notLoggedIn
+            }
             return .failed(detail)
         } catch {
             return .failed(prior.isEmpty ? "The video page didn’t answer." : prior)
@@ -882,7 +1030,8 @@ final class TikTokWebSession: NSObject, ObservableObject {
           scrollPage: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "" }; },
           thumbnail: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "", dataURL: "" }; },
           openAppLogin: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "TikTokBridge.js is missing from the app." }; },
-          unrepostTap: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "TikTokBridge.js is missing from the app." }; }
+          unrepostTap: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "TikTokBridge.js is missing from the app." }; },
+          confirmRemoved: async function () { return { ok: false, code: "BRIDGE_MISSING", message: "TikTokBridge.js is missing from the app." }; }
         };
         """
     }
@@ -916,6 +1065,7 @@ private enum BridgeCall: String {
     case thumbnail
     case openAppLogin
     case unrepostTap
+    case confirmRemoved
 }
 
 private enum TikTokURL {

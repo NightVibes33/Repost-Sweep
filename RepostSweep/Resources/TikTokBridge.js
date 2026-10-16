@@ -1,9 +1,17 @@
 // Repost Sweep page bridge.
 // Runs inside the hidden TikTok WKWebView. It never reads password fields and
-// never returns cookies to the app. Listing uses the repost endpoint the
-// website calls. Removal replays a signed unrepost request when the page has
-// made one, otherwise asks TikTok's own signer, and reports a non-JSON body
-// as NEEDS_FALLBACK instead of treating it as success.
+// never returns cookies to the app.
+//
+// Removal attribution (see THIRD_PARTY_NOTICES.md):
+// - The upvote/delete request (POST, empty body, aid + item_id on the query,
+//   tt-csrf-token from webapp.app-context) and the “re-list and confirm the
+//   id is gone” check follow gabireze/tiktok-all-reposted-videos-remover (MIT).
+// - Repost-button selectors and the already-reposted check follow
+//   BrittAbdula/tiktokrepostremover (MIT, ClearTok).
+// - Retargeting a captured signed URL onto /tiktok/v1/upvote/delete and
+//   re-signing it is a clean-room reimplementation of the approach in
+//   kien234/tiktok-unrepost. That repo has no license, so its code is not
+//   included here.
 (function () {
   "use strict";
 
@@ -57,12 +65,16 @@
       XMLHttpRequest.prototype.send = function (body) {
         try {
           var url = String(this.__rsURL || "");
-          if (!window.__repostSweepReplay && isDeleteURL(url)) {
-            window.__repostSweepNetHook.lastDelete = {
-              url: url,
-              method: String(this.__rsMethod || "POST"),
-              body: bodyToString(body)
-            };
+          if (!window.__repostSweepReplay) {
+            noteTraffic(url);
+            if (isDeleteURL(url)) {
+              window.__repostSweepNetHook.lastDelete = {
+                url: url,
+                method: String(this.__rsMethod || "POST"),
+                body: bodyToString(body)
+              };
+              window.__repostSweepNetHook.lastDeleteAt = Date.now();
+            }
           }
         } catch (error) {
           /* capture is best-effort */
@@ -147,6 +159,15 @@
     return "";
   }
 
+  function noteTraffic(url) {
+    var hook = window.__repostSweepNetHook;
+    if (!hook) return;
+    var text = String(url || "");
+    if (/X-Bogus|X-Gnarly|_signature|msToken=/i.test(text)) {
+      hook.lastSignedURL = text;
+    }
+  }
+
   function recordDelete(input, init) {
     if (window.__repostSweepReplay) return;
     var url = "";
@@ -158,6 +179,7 @@
       method = input.method || method;
     }
     if (init && init.method) method = init.method;
+    noteTraffic(url);
     if (!isDeleteURL(String(url))) return;
     var body = "";
     if (init && init.body != null) body = bodyToString(init.body);
@@ -166,6 +188,7 @@
       method: String(method),
       body: body
     };
+    window.__repostSweepNetHook.lastDeleteAt = Date.now();
   }
 
   function readHydration() {
@@ -638,7 +661,12 @@
         signed = await crawler.frontierSign({ url: absolute });
       }
       if (!signed && typeof crawler.sign === "function") {
-        signed = await crawler.sign({ url: absolute });
+        try {
+          signed = await crawler.sign({ url: absolute });
+        } catch (error) {
+          signed = null;
+        }
+        if (!signed) signed = await crawler.sign(absolute);
       }
     } catch (error) {
       return "";
@@ -712,12 +740,64 @@
     };
   }
 
-  function outcomeFrom(read) {
-    if (!read) return null;
-    if (read.kind === "ok") return succeed({});
-    if (read.kind === "rate") return fail("RATE_LIMITED", read.message);
-    if (read.kind === "auth") return fail("NOT_LOGGED_IN", read.message);
-    return null;
+  function contextCsrf() {
+    var hydration = readHydration();
+    var scope = hydration && hydration.__DEFAULT_SCOPE__;
+    var context = scope && scope["webapp.app-context"];
+    return (context && (context.csrfToken || context.csrf_token)) || "";
+  }
+
+  function attemptLog(method, url, status, text) {
+    var clean = String(url || "").replace(/([?&])(msToken|X-Bogus|X-Gnarly|_signature)=[^&]*/gi, "$1$2=…");
+    return method + " " + clean.slice(0, 240) + " → http " + status + " " + snippet(text);
+  }
+
+  function retargetDeleteURL(template, itemId) {
+    var parsed = new URL(template, location.origin);
+    parsed.pathname = "/tiktok/v1/upvote/delete";
+    if (!parsed.searchParams.get("aid")) parsed.searchParams.set("aid", "1988");
+    parsed.searchParams.set("item_id", itemId);
+    ["X-Bogus", "x-bogus", "X-Gnarly", "x-gnarly", "_signature"].forEach(function (key) {
+      parsed.searchParams.delete(key);
+    });
+    return parsed.pathname + parsed.search;
+  }
+
+  async function postUpvoteDelete(url, body) {
+    var signed = await signURL(url);
+    var finalURL = signed || url;
+    var hook = window.__repostSweepNetHook;
+    var useNative = Boolean(signed && hook && typeof hook.nativeFetch === "function");
+    var fetcher = useNative ? hook.nativeFetch : window.fetch;
+    var headers = {
+      accept: "*/*",
+      "content-type": "application/x-www-form-urlencoded"
+    };
+    var csrf = contextCsrf() || cookieValue("tt_csrf_token") || cookieValue("csrf_session_id");
+    if (csrf) headers["tt-csrf-token"] = csrf;
+    window.__repostSweepReplay = true;
+    try {
+      var response = await fetcher.call(window, finalURL, {
+        method: "POST",
+        credentials: "include",
+        headers: headers,
+        body: body == null ? "" : body
+      });
+      var text = "";
+      try {
+        text = await response.text();
+      } catch (error) {
+        text = "";
+      }
+      var read = interpretUnrepost(response.status, text);
+      return {
+        kind: read.kind,
+        message: read.message,
+        log: attemptLog("POST", finalURL, response.status, text)
+      };
+    } finally {
+      window.__repostSweepReplay = false;
+    }
   }
 
   async function remove(payload) {
@@ -727,39 +807,64 @@
     if (!/^\d{6,}$/.test(itemId)) return fail("PARSE", "That repost id doesn’t look usable.");
     if (!onTikTok()) return fail("NOT_ON_TIKTOK", "Open TikTok and sign in.");
 
-    var fallback = "";
+    var logs = [];
+    var blocked = null;
+    function take(result) {
+      if (result && result.log) logs.push(result.log);
+      if (!blocked && result && (result.kind === "rate" || result.kind === "auth")) blocked = result;
+    }
+
     var hook = window.__repostSweepNetHook;
-    if (hook && hook.lastDelete && hook.lastDelete.url) {
+    var template = (hook && (hook.lastSignedURL || (hook.lastDelete && hook.lastDelete.url))) || "";
+    if (template) {
       try {
-        var replayed = await sendDelete(cleanDeleteURL(hook.lastDelete.url), bodyForItem(hook.lastDelete.body, itemId));
-        var replayRead = interpretUnrepost(replayed.status, replayed.text);
-        var replayDone = outcomeFrom(replayRead);
-        if (replayDone) return replayDone;
-        if (replayRead.kind === "fallback") fallback = replayRead.message;
+        take(await postUpvoteDelete(retargetDeleteURL(template, itemId), ""));
       } catch (error) {
-        fallback = "The signed unrepost replay didn’t finish.";
+        logs.push("Signed retarget did not finish.");
       }
     }
 
-    for (var i = 0; i < UNREPOST_PATHS.length; i += 1) {
-      var params = new URLSearchParams();
-      params.set("aid", "1988");
-      params.set("app_name", "tiktok_web");
-      var token = cookieValue("msToken");
-      if (token) params.set("msToken", token);
-      var sent;
+    if (!blocked) {
+      var plain = new URLSearchParams();
+      plain.set("aid", "1988");
+      plain.set("item_id", itemId);
       try {
-        sent = await sendDelete(UNREPOST_PATHS[i] + "?" + params.toString(), bodyForItem("", itemId));
+        take(await postUpvoteDelete("/tiktok/v1/upvote/delete/?" + plain.toString(), ""));
       } catch (error) {
-        fallback = fallback || "The unrepost request didn’t finish.";
-        continue;
+        logs.push("Plain upvote/delete did not finish.");
       }
-      var read = interpretUnrepost(sent.status, sent.text);
-      var done = outcomeFrom(read);
-      if (done) return done;
-      if (read && read.message) fallback = read.message;
     }
-    return fail("NEEDS_FALLBACK", fallback || "Unrepost did not return JSON.");
+
+    var message = logs.join("\n") || "No unrepost request was sent.";
+    if (blocked && blocked.kind === "rate") return fail("RATE_LIMITED", message);
+    if (blocked && blocked.kind === "auth") return fail("NOT_LOGGED_IN", message);
+    return fail("ATTEMPTED", message);
+  }
+
+  async function confirmRemoved(payload) {
+    var input = payload || {};
+    var itemId = String(input.itemId || "");
+    if (!/^\d{6,}$/.test(itemId)) return fail("PARSE", "That repost id doesn’t look usable.");
+    await delay(1200);
+    var cursor = "0";
+    var seen = 0;
+    for (var page = 0; page < 20; page += 1) {
+      var result = await list({ cursor: cursor, secUid: String(input.secUid || ""), mode: "api" });
+      if (!result.ok) {
+        return fail(result.code || "UNVERIFIED", "Couldn’t verify against the repost list. " + (result.message || ""));
+      }
+      for (var i = 0; i < result.items.length; i += 1) {
+        seen += 1;
+        if (String(result.items[i].id) === itemId) {
+          return fail("STILL_THERE", "Item " + itemId + " is still on the repost list.");
+        }
+      }
+      if (!result.hasMore || !result.cursor || result.cursor === cursor) {
+        return succeed({ message: "Verified: " + itemId + " is gone from the repost list (" + seen + " checked)." });
+      }
+      cursor = result.cursor;
+    }
+    return fail("UNVERIFIED", "The repost list is longer than this check, so removal was not confirmed.");
   }
 
   function listFromDom() {
@@ -944,11 +1049,46 @@
       return true;
     }
     var text = controlText(el).toLowerCase();
-    if (!text || text === "repost" || text === "reposts") return false;
     if (text.indexOf("remove repost") !== -1) return true;
     if (text.indexOf("unrepost") !== -1) return true;
     if (text.indexOf("remove from repost") !== -1) return true;
     return false;
+  }
+
+  // ClearTok (MIT): a repost control counts as already reposted when it is
+  // pressed, its icon is filled, or its color is no longer white.
+  function isAlreadyReposted(el) {
+    if (!el) return false;
+    if (el.getAttribute("aria-pressed") === "true") return true;
+    if (el.querySelector("svg [fill]:not([fill='none'])")) return true;
+    try {
+      var color = window.getComputedStyle(el).color;
+      if (color && color !== "rgb(255, 255, 255)" && color !== "rgba(255, 255, 255, 1)") return true;
+    } catch (error) {
+      return false;
+    }
+    return false;
+  }
+
+  function findRepostedToggle() {
+    var selectors = [
+      '[data-e2e="video-share-repost"]',
+      '[data-e2e="browse-repost"]',
+      'button[aria-label*="repost" i]'
+    ];
+    for (var i = 0; i < selectors.length; i += 1) {
+      var nodes = document.querySelectorAll(selectors[i]);
+      for (var j = 0; j < nodes.length; j += 1) {
+        if (!isVisible(nodes[j])) continue;
+        var text = controlText(nodes[j]).toLowerCase();
+        if (text === "repost" || text === "reposts") {
+          if (nodes[j].getAttribute("aria-pressed") === "true") return nodes[j];
+          continue;
+        }
+        if (isAlreadyReposted(nodes[j])) return nodes[j];
+      }
+    }
+    return null;
   }
 
   function findRemoveControl() {
@@ -993,28 +1133,33 @@
 
   async function unrepostTap() {
     if (!onTikTok()) return fail("NOT_ON_TIKTOK", "The video page isn’t on TikTok.");
-    var control = findRemoveControl();
+    var control = findRemoveControl() || findRepostedToggle();
     if (!control) {
       var share = findShare();
-      if (!share) return fail("UI_CHANGED", "Couldn’t find the share menu or a Remove repost control.");
-      activate(share);
-      await delay(600);
-      control = findRemoveControl();
-    }
-    if (!control) return fail("UI_CHANGED", "The share menu opened, but Remove repost wasn’t there.");
-    activate(control);
-    var gone = 0;
-    for (var i = 0; i < 10; i += 1) {
-      await delay(400);
-      if (removedToast()) return succeed({ message: "Remove repost confirmed." });
-      if (findRemoveControl()) {
-        gone = 0;
-      } else {
-        gone += 1;
-        if (gone >= 2) return succeed({ message: "Remove repost control is gone." });
+      if (share) {
+        activate(share);
+        await delay(700);
+        control = findRemoveControl() || findRepostedToggle();
       }
     }
-    return fail("UI_CHANGED", "Tapped Remove repost, but the control didn’t flip.");
+    if (!control) {
+      return fail("UI_CHANGED", "Couldn’t find Remove repost, or a repost button that is already on.");
+    }
+    var hook = window.__repostSweepNetHook || {};
+    var before = hook.lastDeleteAt || 0;
+    var label = controlText(control).slice(0, 80);
+    activate(control);
+    var deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await delay(350);
+      var stamp = (window.__repostSweepNetHook && window.__repostSweepNetHook.lastDeleteAt) || 0;
+      if (stamp > before) {
+        var logged = window.__repostSweepNetHook.lastDelete && window.__repostSweepNetHook.lastDelete.url;
+        return succeed({ message: "Tapped “" + label + "”. Delete request: " + String(logged || "").slice(0, 180) });
+      }
+      if (removedToast()) return succeed({ message: "Tapped “" + label + "”. Removal confirmation appeared." });
+    }
+    return fail("UI_CHANGED", "Tapped “" + label + "”, but no unrepost request or confirmation appeared.");
   }
 
   async function thumbnail(payload) {
@@ -1050,10 +1195,11 @@
 
   installNetHook();
   window.__repostSweep = {
-    version: 2,
+    version: 3,
     detect: detect,
     list: list,
     remove: remove,
+    confirmRemoved: confirmRemoved,
     focusReposts: focusReposts,
     scrollPage: scrollPage,
     thumbnail: thumbnail,

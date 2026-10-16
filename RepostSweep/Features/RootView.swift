@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct RootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var session: TikTokWebSession
     @EnvironmentObject private var purchases: PurchaseManager
     @AppStorage("didFinishOnboarding") private var didFinishOnboarding = false
@@ -27,6 +28,14 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .tint(Theme.pink)
+        .onOpenURL { url in
+            session.handleAuthCallback(url)
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                session.sceneBecameActive()
+            }
+        }
         .sheet(isPresented: $session.showingDebugPage) {
             DebugPageSheet()
                 .sweepSheetChrome()
