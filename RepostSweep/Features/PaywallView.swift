@@ -11,18 +11,23 @@ struct PaywallView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("Finish the whole tab.")
-                        .font(Typeface.title())
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Remove\nthe cap.")
+                        .font(.system(size: 40, weight: .bold, design: .rounded))
                         .foregroundStyle(Theme.ink)
-                    Text("The free tier covers \(Monetization.freeRemovalLimit) removals on this device. You’ve used \(freeTier.used). Weekly and yearly plans remove the cap.")
-                        .font(Typeface.body())
+                        .minimumScaleFactor(0.8)
+                    Text("\(Monetization.freeRemovalLimit) removals are free on this device. You’ve used \(freeTier.used). Weekly and yearly plans clear the rest.")
+                        .font(.system(size: 16))
                         .foregroundStyle(Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
 
+                    feature("checkmark.circle.fill", "Remove every repost you select")
+                    feature("clock.arrow.circlepath", "A history of what left the tab")
+                    feature("lock.fill", "Original videos stay up")
+
                     if purchases.isSubscribed {
                         SurfaceCard {
-                            Text("This Apple ID already has Repost Sweep Premium.")
+                            Text("Premium is already active on this Apple ID.")
                                 .font(Typeface.body())
                                 .foregroundStyle(Theme.ink)
                         }
@@ -42,7 +47,7 @@ struct PaywallView: View {
                     if let purchaseError = purchases.purchaseError {
                         Text(purchaseError)
                             .font(.footnote)
-                            .foregroundStyle(Theme.danger)
+                            .foregroundStyle(Theme.pink)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
@@ -52,12 +57,13 @@ struct PaywallView: View {
                         }
                     } else if purchases.isPurchasing {
                         ProgressView("Contacting the App Store…")
+                            .tint(Theme.pink)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                     } else {
                         PrimaryButton(
                             title: purchases.product(id: selectedID) == nil ? "Subscriptions unavailable" : "Continue",
-                            systemImage: "sparkles",
+                            systemImage: nil,
                             enabled: purchases.product(id: selectedID) != nil
                         ) {
                             guard let product = purchases.product(id: selectedID) else { return }
@@ -84,7 +90,7 @@ struct PaywallView: View {
                     .disabled(purchases.isPurchasing)
 
                     if purchases.products.isEmpty {
-                        Text("Prices load from the App Store on a signed build that uses the product IDs in Monetization.swift. Until then, the \(freeTier.remaining) free removals still work.")
+                        Text("Prices load from the App Store on a signed build. On this unsigned build the \(freeTier.remaining) free removals still work.")
                             .font(.footnote)
                             .foregroundStyle(Theme.muted)
                             .fixedSize(horizontal: false, vertical: true)
@@ -107,23 +113,57 @@ struct PaywallView: View {
                 .padding(20)
                 .readableColumn()
             }
-            .background(Theme.canvas.ignoresSafeArea())
+            .background {
+                ZStack {
+                    Theme.canvas
+                    Circle()
+                        .fill(Theme.pink.opacity(0.35))
+                        .frame(width: 240, height: 240)
+                        .blur(radius: 100)
+                        .offset(y: -220)
+                }
+                .ignoresSafeArea()
+            }
             .navigationTitle("Premium")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Close") { dismiss() }
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Theme.ink)
+                            .frame(width: 30, height: 30)
+                            .background(Theme.raised)
+                            .clipShape(Circle())
+                    }
+                    .accessibilityLabel("Close")
                 }
             }
+            .toolbarBackground(Theme.canvas, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+    }
+
+    private func feature(_ symbol: String, _ text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(Theme.cyan)
+                .frame(width: 22)
+            Text(text)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.ink)
+        }
     }
 
     private func planCard(id: String, fallbackTitle: String, badge: String?) -> some View {
         let product = purchases.product(id: id)
         let selected = selectedID == id
         return Button {
+            Haptics.select()
             selectedID = id
         } label: {
             HStack(alignment: .center, spacing: 12) {
@@ -135,10 +175,10 @@ struct PaywallView: View {
                         if let badge {
                             Text(badge)
                                 .font(.system(size: 11, weight: .bold, design: .rounded))
-                                .foregroundStyle(Theme.accentInk)
+                                .foregroundStyle(.white)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
-                                .background(Theme.accent)
+                                .background(Theme.pink)
                                 .clipShape(Capsule())
                         }
                     }
@@ -149,15 +189,15 @@ struct PaywallView: View {
                 Spacer()
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 22))
-                    .foregroundStyle(selected ? Theme.accent : Theme.muted)
+                    .foregroundStyle(selected ? Theme.pink : Theme.muted)
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Theme.raised : Theme.surface)
+            .background(Theme.surface)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(selected ? Theme.accent : Theme.line, lineWidth: selected ? 2 : 1)
+                    .stroke(selected ? Theme.pink : Theme.line, lineWidth: selected ? 2 : 1)
             )
         }
         .buttonStyle(.plain)

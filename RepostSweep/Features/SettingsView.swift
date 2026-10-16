@@ -7,18 +7,34 @@ struct SettingsView: View {
 
     @State private var confirmSignOut = false
     @State private var showPrivacy = false
+    @State private var showPaywall = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     SurfaceCard {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("TikTok session")
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("TikTok")
                                 .font(Typeface.headline())
                                 .foregroundStyle(Theme.ink)
                             if let account = session.account, account.uniqueId.isEmpty == false {
-                                Text("Signed in as @\(account.uniqueId)")
+                                HStack(spacing: 12) {
+                                    AvatarView(
+                                        urlString: account.avatarURL,
+                                        fallback: account.nickname.isEmpty ? account.uniqueId : account.nickname
+                                    )
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(account.nickname.isEmpty ? "@\(account.uniqueId)" : account.nickname)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundStyle(Theme.ink)
+                                        Text("@\(account.uniqueId)")
+                                            .font(.subheadline)
+                                            .foregroundStyle(Theme.muted)
+                                    }
+                                }
+                            } else if session.hasSessionCookie {
+                                Text("Signed in. Profile still loading.")
                                     .font(.subheadline)
                                     .foregroundStyle(Theme.muted)
                             } else {
@@ -30,17 +46,17 @@ struct SettingsView: View {
                                 .font(.footnote)
                                 .foregroundStyle(Theme.muted)
                                 .fixedSize(horizontal: false, vertical: true)
-                            if session.account == nil {
-                                PrimaryButton(title: "Sign in to TikTok", systemImage: "person") {
+                            if session.hasSessionCookie == false && session.account == nil {
+                                PrimaryButton(title: "Log in to TikTok", systemImage: "person.fill") {
                                     dismiss()
                                     session.beginLogin()
                                 }
                             } else {
-                                Button("Sign out and clear the browser") {
+                                Button("Log out") {
                                     confirmSignOut = true
                                 }
                                 .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(Theme.danger)
+                                .foregroundStyle(Theme.pink)
                             }
                         }
                     }
@@ -53,6 +69,11 @@ struct SettingsView: View {
                             Text(purchases.isSubscribed ? "Premium is active on this Apple ID." : "Free tier, unless a subscription is active.")
                                 .font(.subheadline)
                                 .foregroundStyle(Theme.muted)
+                            if purchases.isSubscribed == false {
+                                QuietButton(title: "See plans") {
+                                    showPaywall = true
+                                }
+                            }
                             QuietButton(title: "Restore purchases") {
                                 Task { await purchases.restore() }
                             }
@@ -62,7 +83,7 @@ struct SettingsView: View {
                             if let purchaseError = purchases.purchaseError {
                                 Text(purchaseError)
                                     .font(.footnote)
-                                    .foregroundStyle(Theme.danger)
+                                    .foregroundStyle(Theme.pink)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
@@ -92,16 +113,22 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .toolbarBackground(Theme.canvas, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .navigationDestination(isPresented: $showPrivacy) {
                 PrivacyView()
             }
+            .sheet(isPresented: $showPaywall) {
+                PaywallView()
+                    .sweepSheetChrome()
+            }
             .confirmationDialog(
-                "Sign out of TikTok in this app?",
+                "Log out of TikTok in this app?",
                 isPresented: $confirmSignOut,
                 titleVisibility: .visible
             ) {
-                Button("Sign out", role: .destructive) {
-                    session.signOut()
+                Button("Log out", role: .destructive) {
+                    Task { await session.signOut() }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {

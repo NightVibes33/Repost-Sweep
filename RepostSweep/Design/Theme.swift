@@ -2,25 +2,24 @@ import SwiftUI
 import UIKit
 
 enum Theme {
-    static let canvas = dynamic(light: rgb(243, 245, 240), dark: rgb(20, 24, 21))
-    static let surface = dynamic(light: rgb(255, 255, 255), dark: rgb(28, 34, 30))
-    static let raised = dynamic(light: rgb(232, 236, 226), dark: rgb(39, 48, 42))
-    static let ink = dynamic(light: rgb(18, 28, 22), dark: rgb(244, 246, 239))
-    static let muted = dynamic(light: rgb(84, 97, 88), dark: rgb(183, 194, 184))
-    static let accent = dynamic(light: rgb(190, 216, 32), dark: rgb(214, 242, 92))
-    static let accentInk = Color(red: 20 / 255, green: 32 / 255, blue: 8 / 255)
-    static let danger = dynamic(light: rgb(176, 48, 38), dark: rgb(255, 122, 104))
-    static let line = dynamic(light: rgb(214, 220, 208), dark: rgb(58, 68, 60))
+    static let canvas = Color.black
+    static let surface = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255)
+    static let raised = Color(red: 44 / 255, green: 44 / 255, blue: 46 / 255)
+    static let ink = Color.white
+    static let muted = Color(red: 161 / 255, green: 161 / 255, blue: 166 / 255)
+    static let pink = Color(red: 254 / 255, green: 44 / 255, blue: 85 / 255)
+    static let cyan = Color(red: 37 / 255, green: 244 / 255, blue: 238 / 255)
+    static let accent = pink
+    static let accentInk = Color.white
+    static let danger = pink
+    static let success = Color(red: 48 / 255, green: 209 / 255, blue: 88 / 255)
+    static let line = Color.white.opacity(0.08)
 
-    private static func rgb(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) -> UIColor {
-        UIColor(red: red / 255, green: green / 255, blue: blue / 255, alpha: 1)
-    }
-
-    private static func dynamic(light: UIColor, dark: UIColor) -> Color {
-        Color(uiColor: UIColor { traits in
-            traits.userInterfaceStyle == .dark ? dark : light
-        })
-    }
+    static let brand = LinearGradient(
+        colors: [cyan, pink],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
 }
 
 enum Typeface {
@@ -41,9 +40,41 @@ enum Typeface {
     }
 }
 
+enum Haptics {
+    static func tap() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    static func burst() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    static func success() {
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    static func warning() {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    }
+
+    static func select() {
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+}
+
 extension View {
     func readableColumn() -> some View {
-        frame(maxWidth: 560)
+        frame(maxWidth: 520)
             .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    func sweepSheetChrome() -> some View {
+        if #available(iOS 16.4, *) {
+            self.presentationBackground(Theme.canvas)
+                .presentationCornerRadius(28)
+        } else {
+            self
+        }
     }
 }

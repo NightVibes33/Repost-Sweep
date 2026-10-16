@@ -8,22 +8,32 @@ struct RootView: View {
     var body: some View {
         ZStack {
             Theme.canvas.ignoresSafeArea()
-            WebViewHost(webView: session.webView)
-                .opacity(session.showingLogin ? 1 : 0)
-                .allowsHitTesting(session.showingLogin)
-                .accessibilityHidden(!session.showingLogin)
-                .ignoresSafeArea()
-
-            if session.showingLogin {
-                LoginChrome()
-            } else if didFinishOnboarding {
-                HomeView()
-            } else {
-                OnboardingView {
-                    didFinishOnboarding = true
-                    Task { await session.warmUp() }
+            if session.showingLogin == false && session.showingDebugPage == false {
+                WebViewHost(webView: session.webView)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            Group {
+                if didFinishOnboarding {
+                    HomeView()
+                } else {
+                    OnboardingView {
+                        didFinishOnboarding = true
+                        Task { await session.warmUp() }
+                    }
                 }
             }
+        }
+        .preferredColorScheme(.dark)
+        .tint(Theme.pink)
+        .sheet(isPresented: $session.showingLogin, onDismiss: { session.loginSheetDismissed() }) {
+            LoginSheet()
+                .sweepSheetChrome()
+        }
+        .sheet(isPresented: $session.showingDebugPage) {
+            DebugPageSheet()
+                .sweepSheetChrome()
         }
         .task {
             await purchases.start()
@@ -34,74 +44,122 @@ struct RootView: View {
     }
 }
 
-private struct LoginChrome: View {
+struct LoginSheet: View {
     @EnvironmentObject private var session: TikTokWebSession
 
     var body: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Sign in on TikTok")
-                        .font(Typeface.headline())
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center) {
+                MarkView(size: 36)
+                Spacer()
+                Button {
+                    session.closeLogin()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(Theme.ink)
-                    Spacer()
-                    Button("Close") {
-                        session.closeLogin()
-                    }
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Theme.ink)
+                        .frame(width: 32, height: 32)
+                        .background(Theme.raised)
+                        .clipShape(Circle())
                 }
-                Text(LegalCopy.password)
+                .accessibilityLabel("Close")
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+
+            Text("Log in to TikTok")
+                .font(.system(size: 28, weight: .bold, design: .rounded))
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+
+            Text("TikTok’s own sign-in, inside this sheet. Repost Sweep never sees your password.")
+                .font(.subheadline)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 20)
+                .padding(.top, 6)
+
+            progressBar
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
+
+            WebViewHost(webView: session.webView)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Theme.line, lineWidth: 1)
+                )
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+            if let pageError = session.pageError {
+                Text(pageError)
                     .font(.footnote)
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 12) {
-                    Button("Reload") {
-                        session.reloadLogin()
-                    }
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Theme.ink)
-                    if session.isPageLoading {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Spacer()
+                    .foregroundStyle(Theme.pink)
+                    .padding(.horizontal, 20)
+            }
+
+            HStack {
+                Button("Reload") {
+                    session.reloadLogin()
                 }
-                if let pageError = session.pageError {
-                    Text(pageError)
-                        .font(.footnote)
-                        .foregroundStyle(Theme.danger)
-                        .fixedSize(horizontal: false, vertical: true)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.muted)
+                Spacer()
+                if session.isPageLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Theme.pink)
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.top, 8)
-            .padding(.bottom, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.ultraThinMaterial)
+            .padding(.bottom, 14)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Theme.canvas.ignoresSafeArea())
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
 
-            Spacer(minLength: 0)
-                .allowsHitTesting(false)
-
-            if let account = session.account, account.uniqueId.isEmpty == false {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Signed in as @\(account.uniqueId)")
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Theme.ink)
-                    Text("The session stays in this browser. Continue when the page looks like your account.")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                    PrimaryButton(title: "Continue", systemImage: "arrow.right") {
-                        session.closeLogin()
-                    }
-                }
-                .padding(16)
-                .background(Theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
+    private var progressBar: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Theme.raised)
+                Capsule()
+                    .fill(Theme.brand)
+                    .frame(width: max(8, proxy.size.width * session.loginProgress))
             }
         }
+        .frame(height: 3)
+        .accessibilityLabel("Loading TikTok")
+    }
+}
+
+struct DebugPageSheet: View {
+    @EnvironmentObject private var session: TikTokWebSession
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            WebViewHost(webView: session.webView)
+                .ignoresSafeArea(edges: .bottom)
+                .background(Theme.canvas)
+                .navigationTitle("TikTok page")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Close") {
+                            session.showingDebugPage = false
+                            dismiss()
+                        }
+                    }
+                }
+                .toolbarBackground(Theme.canvas, for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
     }
 }

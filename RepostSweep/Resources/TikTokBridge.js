@@ -242,10 +242,56 @@
     );
   }
 
+  function remoteAccount(json) {
+    var data = json;
+    if (data && data.data && typeof data.data === "object") data = data.data;
+    if (data && data.userInfo && data.userInfo.user) data = data.userInfo.user;
+    else if (data && data.user && typeof data.user === "object") data = data.user;
+    if (!data || typeof data !== "object") return null;
+    var uniqueId = String(data.uniqueId || data.unique_id || data.username || "");
+    if (!uniqueId || /^\d+$/.test(uniqueId)) return null;
+    var avatar = data.avatar_url || data.avatarUrl || "";
+    if (!avatar) avatar = avatarOf(data);
+    return {
+      uniqueId: uniqueId,
+      nickname: String(data.screen_name || data.nickname || data.nickName || ""),
+      secUid: String(data.sec_user_id || data.secUid || data.sec_uid || ""),
+      avatarURL: String(avatar || "")
+    };
+  }
+
+  async function fetchSelf() {
+    try {
+      var response = await fetch("/passport/web/account/info/?aid=1988&account_sdk_source=web", {
+        method: "GET",
+        credentials: "include",
+        headers: { accept: "application/json, text/plain, */*" }
+      });
+      if (!response.ok) return null;
+      var json = await response.json();
+      return remoteAccount(json);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function fillAccount(base, extra) {
+    if (!extra) return base;
+    if (!base) return extra;
+    if (!base.uniqueId) base.uniqueId = extra.uniqueId;
+    if (!base.nickname) base.nickname = extra.nickname;
+    if (!base.secUid) base.secUid = extra.secUid;
+    if (!base.avatarURL) base.avatarURL = extra.avatarURL;
+    return base;
+  }
+
   async function detect() {
     if (!onTikTok()) return fail("NOT_ON_TIKTOK", "Sign-in happens on TikTok’s website.");
     var account = mergeAccount();
-    if (!account) return fail("NOT_LOGGED_IN", "TikTok doesn’t show a signed-in account yet.");
+    if (!account || !account.uniqueId || !account.secUid || !account.avatarURL) {
+      account = fillAccount(account, await fetchSelf());
+    }
+    if (!account || !account.uniqueId) return fail("NOT_LOGGED_IN", "TikTok doesn’t show a signed-in account yet.");
     return succeed({ account: account });
   }
 
@@ -255,8 +301,16 @@
     if (input.mode === "dom") return listFromDom();
 
     var account = mergeAccount();
-    if (!account) return fail("NOT_LOGGED_IN", "TikTok doesn’t show a signed-in account yet.");
-    if (!account.secUid) return fail("NO_SEC_UID", "TikTok didn’t include the account id on this page.");
+    var supplied = String(input.secUid || "");
+    if (supplied && (!account || !account.secUid)) {
+      if (!account) {
+        account = { uniqueId: "", nickname: "", secUid: supplied, avatarURL: "" };
+      } else {
+        account.secUid = supplied;
+      }
+    }
+    if (!account && !supplied) return fail("NOT_LOGGED_IN", "TikTok doesn’t show a signed-in account yet.");
+    if (!account || !account.secUid) return fail("NO_SEC_UID", "TikTok didn’t include the account id on this page.");
 
     var url = LIST_PATH + "?" + listParams(account.secUid, input.cursor || "0").toString();
     var response;

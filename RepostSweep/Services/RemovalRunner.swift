@@ -11,11 +11,10 @@ final class RemovalRunner: ObservableObject {
     @Published private(set) var isPaused = false
     @Published private(set) var isFinished = false
     @Published private(set) var needsPaywall = false
-    @Published private(set) var statusText = "Getting ready"
+    @Published private(set) var statusText = ""
     @Published private(set) var siteChangeDetail: String?
 
     private var stopRequested = false
-    private var startedAt: Date?
     private let spacingRange: ClosedRange<TimeInterval> = 2.2...3.4
     private let rateLimitBackoff: TimeInterval = 25
 
@@ -27,42 +26,24 @@ final class RemovalRunner: ObservableObject {
         max(0, total - processed)
     }
 
-    var estimateText: String {
-        guard isFinished == false else { return "Finished" }
-        if isPaused { return "Paused" }
-        let left = remainingCount
-        guard left > 0, isRunning else { return statusText }
-        let pace: TimeInterval
-        if completed >= 1, let startedAt {
-            pace = max(2.2, Date().timeIntervalSince(startedAt) / Double(max(completed, 1)))
-        } else {
-            pace = 2.8
-        }
-        let seconds = Int(pace * Double(left))
-        if seconds < 50 {
-            return "Under a minute left"
-        }
-        let minutes = Int((Double(seconds) / 60).rounded(.up))
-        return "About \(minutes) min left"
-    }
-
     func togglePause() {
         guard isRunning, isFinished == false else { return }
         isPaused.toggle()
-        statusText = isPaused ? "Paused. Nothing else will be removed until you resume." : "Resuming."
+        statusText = isPaused ? "Paused" : "Resuming"
     }
 
     func stop() {
         stopRequested = true
         isPaused = false
-        statusText = "Stopping after the current repost."
+        statusText = "Stopping"
     }
 
     func start(
         items: [RepostItem],
         session: TikTokWebSession,
         freeTier: FreeTierStore,
-        purchases: PurchaseManager
+        purchases: PurchaseManager,
+        history: HistoryStore
     ) {
         guard isRunning == false else { return }
         total = items.count
@@ -74,13 +55,13 @@ final class RemovalRunner: ObservableObject {
         needsPaywall = false
         siteChangeDetail = nil
         stopRequested = false
-        startedAt = Date()
         statusText = "Starting"
         isRunning = true
         session.removalActive = true
+        Haptics.burst()
 
         Task {
-            await run(items: items, session: session, freeTier: freeTier, purchases: purchases)
+            await run(items: items, session: session, freeTier: freeTier, purchases: purchases, history: history)
         }
     }
 
@@ -88,7 +69,8 @@ final class RemovalRunner: ObservableObject {
         items: [RepostItem],
         session: TikTokWebSession,
         freeTier: FreeTierStore,
-        purchases: PurchaseManager
+        purchases: PurchaseManager,
+        history: HistoryStore
     ) async {
         var streak = 0
         for item in items {
@@ -96,10 +78,9 @@ final class RemovalRunner: ObservableObject {
             await waitWhilePaused()
             if stopRequested { break }
 
-            let subscribed = purchases.isSubscribed
-            if subscribed == false, freeTier.remaining <= 0 {
+            if purchases.isSubscribed == false, freeTier.remaining <= 0 {
                 needsPaywall = true
-                statusText = "The free removals on this device are used up."
+                statusText = "Free removals are used up"
                 break
             }
 
@@ -110,9 +91,10 @@ final class RemovalRunner: ObservableObject {
             case .removed:
                 completed += 1
                 streak = 0
-                if subscribed == false {
+                if purchases.isSubscribed == false {
                     freeTier.recordRemoval()
                 }
+                history.record(item: item, removed: true, detail: "")
                 session.reposts.removeAll { $0.id == item.id }
                 if item.id != items.last?.id && stopRequested == false {
                     await sleep(spacingRange)
@@ -120,21 +102,40 @@ final class RemovalRunner: ObservableObject {
             case .rateLimited:
                 failed += 1
                 streak += 1
-                statusText = "TikTok asked for a longer pause."
+                history.record(item: item, removed: false, detail: "TikTok asked for a pause")
+                statusText = "TikTok asked for a pause"
                 await sleep(rateLimitBackoff...rateLimitBackoff)
             case .notLoggedIn:
-                statusText = "TikTok signed this session out. Sign in again, then retry the rest."
+                session.notice = SweepNotice(
+                    title: "TikTok signed you out",
+                    message: "The session expired before this repost could be removed. Log in again, then retry the rest. Original videos were not deleted.",
+                    debugHint: "NOT_LOGGED_IN",
+                    suggestLogin: true
+                )
+                statusText = "Signed out"
                 stopRequested = true
             case .siteChanged(let detail):
                 siteChangeDetail = detail
                 session.siteChangeMessage = detail
-                statusText = "Stopped because TikTok’s page changed."
+                session.notice = SweepNotice(
+                    title: "TikTok changed this step",
+                    message: "Removal stopped so nothing else was guessed. Reposts that already went through are done. Original videos were not deleted.",
+                    debugHint: detail
+                )
+                history.record(item: item, removed: false, detail: "Page changed")
+                statusText = "Stopped"
                 stopRequested = true
-            case .failed:
+            case .failed(let detail):
                 failed += 1
                 streak += 1
+                history.record(item: item, removed: false, detail: detail.isEmpty ? "Didn’t go through" : detail)
                 if streak >= 3 {
-                    statusText = "Three removals failed in a row, so the sweep stopped. The ones that succeeded are already gone."
+                    session.notice = SweepNotice(
+                        title: "Removal paused after three misses",
+                        message: "Three reposts in a row didn’t go through, so the sweep stopped. The ones that succeeded are already off your reposts tab.",
+                        debugHint: detail
+                    )
+                    statusText = "Stopped"
                     stopRequested = true
                 } else {
                     await sleep(spacingRange)
@@ -147,9 +148,23 @@ final class RemovalRunner: ObservableObject {
         isRunning = false
         isFinished = true
         isPaused = false
-        let canSummarize = statusText.hasPrefix("Removing") || statusText == "Starting" || statusText.hasPrefix("Resuming")
-        if siteChangeDetail == nil, needsPaywall == false, canSummarize {
-            statusText = "Removed \(completed). \(failed) didn’t go through."
+        if siteChangeDetail == nil, needsPaywall == false, session.notice == nil {
+            if completed > 0 && failed == 0 {
+                session.banner = "Removed \(completed) from your repost tab."
+                statusText = "Removed \(completed)"
+            } else if completed > 0 {
+                session.banner = "Removed \(completed). \(failed) stayed on the tab."
+                statusText = "Removed \(completed)"
+            } else if stopRequested {
+                statusText = "Stopped"
+            } else {
+                statusText = ""
+            }
+        }
+        if completed > 0 && siteChangeDetail == nil {
+            Haptics.success()
+        } else if failed > 0 || siteChangeDetail != nil {
+            Haptics.warning()
         }
     }
 

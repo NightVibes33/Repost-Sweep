@@ -135,3 +135,20 @@ enum SessionError: Error {
     case emptyResult
     case badPayload
 }
+
+struct SweepNotice: Equatable {
+    var title: String
+    var message: String
+    var debugHint: String?
+    var suggestLogin: Bool = false
+}
+
+struct HistoryEntry: Identifiable, Codable, Equatable {
+    var id: UUID
+    var itemId: String
+    var title: String
+    var author: String
+    var date: Date
+    var removed: Bool
+    var detail: String
+}
