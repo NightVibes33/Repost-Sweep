@@ -6,14 +6,15 @@ struct HistoryView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("\(history.lifetimeRemoved)")
-                        .font(.system(size: 56, weight: .bold, design: .rounded))
+                        .font(Typeface.hero)
                         .foregroundStyle(Theme.ink)
                         .monospacedDigit()
+                        .numericTextTransition()
                     Text(history.lifetimeRemoved == 1 ? "repost removed" : "reposts removed")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(Typeface.body)
                         .foregroundStyle(Theme.muted)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -22,7 +23,7 @@ struct HistoryView: View {
                 if history.entries.isEmpty {
                     SurfaceCard {
                         Text("Removals you run show up here, on this device.")
-                            .font(.subheadline)
+                            .font(Typeface.secondary)
                             .foregroundStyle(Theme.muted)
                     }
                 } else {
@@ -33,13 +34,17 @@ struct HistoryView: View {
                     }
                 }
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, Theme.margin)
             .padding(.bottom, 24)
             .readableColumn()
         }
         .background(Theme.canvas.ignoresSafeArea())
         .navigationTitle("History")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbarBackground(Theme.canvas, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("Clear") {
@@ -68,26 +73,29 @@ private struct HistoryRow: View {
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(entry.removed ? Theme.success : Theme.pink)
                 .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(entry.author.isEmpty ? entry.title : "@\(entry.author)")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(Typeface.secondary)
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
                 if entry.author.isEmpty == false {
                     Text(entry.title)
-                        .font(.system(size: 13))
+                        .font(Typeface.caption)
                         .foregroundStyle(Theme.muted)
                         .lineLimit(2)
                 }
                 Text(subtitle)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typeface.caption)
                     .foregroundStyle(Theme.muted)
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
-        .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(Theme.cardPadding)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.radius, style: .continuous)
+                .strokeBorder(Theme.line, lineWidth: 1)
+        )
     }
 
     private var subtitle: String {

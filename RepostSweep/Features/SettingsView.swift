@@ -7,118 +7,119 @@ struct SettingsView: View {
 
     @AppStorage("didFinishOnboarding") private var didFinishOnboarding = true
     @State private var confirmSignOut = false
-    @State private var showPrivacy = false
     @State private var showPaywall = false
     @State private var replayOnboarding = false
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    SurfaceCard {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("TikTok")
-                                .font(Typeface.headline())
-                                .foregroundStyle(Theme.ink)
-                            if let account = session.account, account.uniqueId.isEmpty == false {
-                                HStack(spacing: 12) {
-                                    AvatarView(
-                                        urlString: account.avatarURL,
-                                        fallback: account.nickname.isEmpty ? account.uniqueId : account.nickname
-                                    )
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(account.nickname.isEmpty ? "@\(account.uniqueId)" : account.nickname)
-                                            .font(.system(size: 16, weight: .semibold))
-                                            .foregroundStyle(Theme.ink)
-                                        Text("@\(account.uniqueId)")
-                                            .font(.subheadline)
-                                            .foregroundStyle(Theme.muted)
-                                        if let stats = account.statsLine {
-                                            Text(stats)
-                                                .font(.subheadline)
-                                                .foregroundStyle(Theme.muted)
-                                        }
-                                    }
-                                }
-                            } else if session.hasSessionCookie {
-                                Text("Signed in. Profile still loading.")
-                                    .font(.subheadline)
+            List {
+                Section {
+                    if let account = session.account, account.uniqueId.isEmpty == false {
+                        HStack(spacing: 12) {
+                            AvatarView(
+                                urlString: account.avatarURL,
+                                fallback: account.nickname.isEmpty ? account.uniqueId : account.nickname
+                            )
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(account.nickname.isEmpty ? "@\(account.uniqueId)" : account.nickname)
+                                    .font(Typeface.body)
+                                    .foregroundStyle(Theme.ink)
+                                Text("@\(account.uniqueId)")
+                                    .font(Typeface.caption)
                                     .foregroundStyle(Theme.muted)
-                            } else {
-                                Text("Not signed in")
-                                    .font(.subheadline)
-                                    .foregroundStyle(Theme.muted)
-                            }
-                            Text(LegalCopy.session)
-                                .font(.footnote)
-                                .foregroundStyle(Theme.muted)
-                                .fixedSize(horizontal: false, vertical: true)
-                            if session.hasSessionCookie == false && session.account == nil {
-                                TikTokLoginControl(phase: session.appLoginPhase) {
-                                    dismiss()
-                                    session.beginLogin()
-                                } onCancel: {
-                                    session.cancelLogin()
+                                if let stats = account.statsLine {
+                                    Text(stats)
+                                        .font(Typeface.caption)
+                                        .foregroundStyle(Theme.muted)
                                 }
-                            } else {
-                                Button("Log out") {
-                                    confirmSignOut = true
-                                }
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(Theme.pink)
                             }
                         }
+                    } else if session.hasSessionCookie {
+                        Text("Signed in. Profile still loading.")
+                            .font(Typeface.body)
+                            .foregroundStyle(Theme.muted)
+                    } else {
+                        Text("Not signed in")
+                            .font(Typeface.body)
+                            .foregroundStyle(Theme.muted)
                     }
-
-                    SurfaceCard {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Subscription")
-                                .font(Typeface.headline())
-                                .foregroundStyle(Theme.ink)
-                            Text(purchases.isSubscribed ? "Premium is active on this Apple ID." : "Free tier, unless a subscription is active.")
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.muted)
-                            if purchases.isSubscribed == false {
-                                QuietButton(title: "See plans") {
-                                    showPaywall = true
-                                }
-                            }
-                            QuietButton(title: "Restore purchases") {
-                                Task { await purchases.restore() }
-                            }
-                            QuietButton(title: "Manage subscription") {
-                                Task { await purchases.manageSubscriptions() }
-                            }
-                            if let purchaseError = purchases.purchaseError {
-                                Text(purchaseError)
-                                    .font(.footnote)
-                                    .foregroundStyle(Theme.pink)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                    Text(LegalCopy.session)
+                        .font(Typeface.caption)
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if session.hasSessionCookie == false && session.account == nil {
+                        TikTokLoginControl(phase: session.appLoginPhase) {
+                            dismiss()
+                            session.beginLogin()
+                        } onCancel: {
+                            session.cancelLogin()
+                        }
+                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    } else {
+                        Button("Log out", role: .destructive) {
+                            confirmSignOut = true
                         }
                     }
+                } header: {
+                    Text("Account")
+                }
+                .listRowBackground(Theme.card)
 
-                    QuietButton(title: "Show onboarding") {
+                Section {
+                    Text(purchases.isSubscribed ? "Premium is active on this Apple ID." : "Free tier, unless a subscription is active.")
+                        .font(Typeface.secondary)
+                        .foregroundStyle(Theme.muted)
+                    if purchases.isSubscribed == false {
+                        Button("See plans") {
+                            showPaywall = true
+                        }
+                    }
+                    Button("Restore purchases") {
+                        Task { await purchases.restore() }
+                    }
+                    Button("Manage subscription") {
+                        Task { await purchases.manageSubscriptions() }
+                    }
+                    if let purchaseError = purchases.purchaseError {
+                        Text(purchaseError)
+                            .font(Typeface.caption)
+                            .foregroundStyle(Theme.pink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } header: {
+                    Text("Subscription")
+                }
+                .listRowBackground(Theme.card)
+
+                Section {
+                    Button("Show onboarding") {
                         replayOnboarding = true
                         dismiss()
                     }
-
-                    QuietButton(title: "Privacy") {
-                        showPrivacy = true
+                    NavigationLink("Privacy") {
+                        PrivacyView()
                     }
+                } header: {
+                    Text("App")
+                }
+                .listRowBackground(Theme.card)
 
+                Section {
                     Text(LegalCopy.notAffiliated)
-                        .font(.footnote)
+                        .font(Typeface.caption)
                         .foregroundStyle(Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
-
                     Text(versionLine)
-                        .font(.caption)
+                        .font(Typeface.caption)
                         .foregroundStyle(Theme.muted)
                 }
-                .padding(20)
-                .readableColumn()
+                .listRowBackground(Theme.card)
             }
+            .listStyle(.insetGrouped)
+            .listRowBackground(Theme.card)
+            .listRowSeparatorTint(Theme.line)
+            .scrollContentBackground(.hidden)
+            .tint(Theme.ink)
             .background(Theme.canvas.ignoresSafeArea())
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -129,13 +130,11 @@ struct SettingsView: View {
             }
             .toolbarBackground(Theme.canvas, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .onDisappear {
                 if replayOnboarding {
                     didFinishOnboarding = false
                 }
-            }
-            .navigationDestination(isPresented: $showPrivacy) {
-                PrivacyView()
             }
             .sheet(isPresented: $showPaywall) {
                 PaywallView()
@@ -166,20 +165,20 @@ struct SettingsView: View {
 struct PrivacyView: View {
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 24) {
                 ForEach(LegalCopy.privacySections) { section in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(section.title)
-                            .font(Typeface.headline())
+                            .font(Typeface.title)
                             .foregroundStyle(Theme.ink)
                         Text(section.body)
-                            .font(Typeface.body())
+                            .font(Typeface.body)
                             .foregroundStyle(Theme.muted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            .padding(20)
+            .padding(Theme.margin)
             .readableColumn()
         }
         .background(Theme.canvas.ignoresSafeArea())

@@ -70,6 +70,7 @@ struct DebugPageSheet: View {
                 }
                 .toolbarBackground(Theme.canvas, for: .navigationBar)
                 .toolbarBackground(.visible, for: .navigationBar)
+                .toolbarColorScheme(.dark, for: .navigationBar)
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)

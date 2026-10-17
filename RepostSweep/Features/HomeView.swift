@@ -8,6 +8,8 @@ struct HomeView: View {
     @EnvironmentObject private var history: HistoryStore
     @EnvironmentObject private var runner: RemovalRunner
 
+    @Namespace private var selectionBar
+
     @State private var selected: Set<String> = []
     @State private var pendingItems: [RepostItem] = []
     @State private var cappedItems: [RepostItem] = []
@@ -17,7 +19,9 @@ struct HomeView: View {
     @State private var showPaywall = false
     @State private var showSettings = false
     @State private var showHistory = false
+    @State private var showList = false
     @State private var confirmSignOut = false
+    @State private var showingSuccess = false
 
     private var signedIn: Bool {
         session.hasSessionCookie || (session.account?.uniqueId.isEmpty == false)
@@ -41,109 +45,24 @@ struct HomeView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    hero
-                    if signedIn {
-                        accountCard
-                        FreeMeter(
-                            used: freeTier.used,
-                            limit: Monetization.freeRemovalLimit,
-                            subscribed: purchases.isSubscribed
-                        ) {
-                            showPaywall = true
-                        }
-                    } else {
-                        signedOutCard
-                    }
-                    if let banner = session.banner, banner.isEmpty == false {
-                        Text(banner)
-                            .font(.footnote)
-                            .foregroundStyle(Theme.ink)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(14)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Theme.surface)
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    }
-                    if let notice = session.notice {
-                        SweepErrorCard(notice: notice) {
-                            Task { await session.loadReposts() }
-                        } onViewPage: {
-                            session.openDebugPage()
-                        } onLogin: {
-                            session.beginLogin()
-                        }
-                    }
-                    if session.debugDetail.isEmpty == false {
-                        debugDetail
-                    }
-                    if session.reposts.isEmpty == false {
-                        listHeader
-                        LazyVStack(spacing: 8) {
-                            ForEach(session.reposts) { item in
-                                RepostRow(
-                                    item: item,
-                                    image: session.thumbnails[item.id],
-                                    selected: selected.contains(item.id),
-                                    active: runner.current?.id == item.id
-                                ) {
-                                    toggle(item.id)
-                                }
-                                .task(id: item.id) {
-                                    await session.loadThumbnail(for: item)
-                                }
-                            }
-                        }
-                    } else if session.isWorking || awaitingFirstScan {
-                        loadingRows
-                    } else if showCaughtUp {
-                        caughtUp
-                    }
-                    Text(LegalCopy.removals)
-                        .font(.caption)
-                        .foregroundStyle(Theme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 4)
+            Group {
+                if signedIn == false {
+                    signIn
+                } else if runner.isRunning || showingSuccess {
+                    progress
+                } else {
+                    dashboard
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 12)
-                .readableColumn()
             }
+            .animation(Motion.spring, value: signedIn)
+            .animation(Motion.spring, value: runner.isRunning)
+            .animation(Motion.spring, value: showingSuccess)
             .background(Theme.canvas.ignoresSafeArea())
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    HStack(spacing: 8) {
-                        MarkView(size: 26)
-                        Text("Repost Sweep")
-                            .font(.system(size: 17, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.ink)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        showSettings = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(Theme.ink)
-                    }
-                    .accessibilityLabel("Settings")
-                }
-            }
-            .toolbarBackground(Theme.canvas, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .safeAreaInset(edge: .bottom) {
-                actionBar
-            }
-            .refreshable {
-                await session.loadReposts()
-            }
             .navigationDestination(isPresented: $showHistory) {
                 HistoryView()
+            }
+            .navigationDestination(isPresented: $showList) {
+                repostList
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
@@ -184,6 +103,9 @@ struct HomeView: View {
             .confirmationDialog("Log out of TikTok in this app?", isPresented: $confirmSignOut, titleVisibility: .visible) {
                 Button("Log out", role: .destructive) {
                     selected.removeAll()
+                    showList = false
+                    showHistory = false
+                    showingSuccess = false
                     Task { await session.signOut() }
                 }
                 Button("Cancel", role: .cancel) {}
@@ -208,6 +130,18 @@ struct HomeView: View {
                     selected = Set(session.reposts.map(\.id))
                 }
             }
+            .onChange(of: runner.isRunning) { running in
+                if running {
+                    showingSuccess = false
+                    showList = false
+                }
+            }
+            .onChange(of: runner.isFinished) { finished in
+                guard finished, runner.isRunning == false else { return }
+                if session.reposts.isEmpty, session.notice == nil, runner.completed > 0 {
+                    showingSuccess = true
+                }
+            }
             .onAppear {
                 if selected.isEmpty, session.reposts.isEmpty == false {
                     selected = Set(session.reposts.map(\.id))
@@ -216,79 +150,366 @@ struct HomeView: View {
         }
     }
 
-    private var hero: some View {
-        VStack(spacing: 8) {
-            ZStack {
-                if runner.isRunning {
-                    ProgressRing(progress: runner.total == 0 ? 0 : Double(runner.processed) / Double(max(runner.total, 1)))
-                        .frame(width: 168, height: 168)
-                }
-                VStack(spacing: 2) {
-                    Text(heroValue)
-                        .font(.system(size: runner.isRunning ? 52 : 72, weight: .bold, design: .rounded))
+    private var signIn: some View {
+        VStack(spacing: 0) {
+            topBar
+                .padding(.horizontal, Theme.margin)
+                .readableColumn()
+            ScrollView {
+                VStack(spacing: 24) {
+                    Spacer(minLength: 36)
+                    if let notice = session.notice {
+                        SweepErrorCard(notice: notice) {
+                            Task { await session.loadReposts() }
+                        } onViewPage: {
+                            session.openDebugPage()
+                        } onLogin: {
+                            session.beginLogin()
+                        }
+                    }
+                    AppGlyph(size: 112)
+                    Text("Sweep your\nreposts.")
+                        .font(Typeface.largeTitle)
                         .foregroundStyle(Theme.ink)
-                        .monospacedDigit()
-                        .minimumScaleFactor(0.6)
-                        .lineLimit(1)
-                    Text(heroCaption)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(showCaughtUp ? Theme.success : Theme.muted)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
+                    Text(LegalCopy.password)
+                        .font(Typeface.body)
+                        .foregroundStyle(Theme.muted)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    LaurelLine(title: "Originals stay up", detail: "Only your repost tab changes")
+                        .padding(.top, 8)
+                }
+                .padding(.horizontal, Theme.margin)
+                .readableColumn()
+            }
+            VStack(spacing: 12) {
+                loginControl
+                Text(LegalCopy.notAffiliated)
+                    .font(Typeface.caption)
+                    .foregroundStyle(Theme.muted)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, Theme.margin)
+            .padding(.bottom, 16)
+            .readableColumn()
+        }
+        .background(ScreenBackdrop())
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private var dashboard: some View {
+        VStack(spacing: 0) {
+            topBar
+                .padding(.horizontal, Theme.margin)
+                .readableColumn()
+            dashboardScroll
+        }
+        .background(Theme.canvas.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            BottomBar {
+                dashboardActions
+                    .matchedGeometryEffect(id: "selectionBar", in: selectionBar, isSource: showList == false)
+            }
+        }
+    }
+
+    private var dashboardScroll: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                if let notice = session.notice {
+                    SweepErrorCard(notice: notice) {
+                        Task { await session.loadReposts() }
+                    } onViewPage: {
+                        session.openDebugPage()
+                    } onLogin: {
+                        session.beginLogin()
+                    }
+                }
+                accountCard
+                countBlock
+                FreeMeter(
+                    used: freeTier.used,
+                    limit: Monetization.freeRemovalLimit,
+                    subscribed: purchases.isSubscribed
+                ) {
+                    showPaywall = true
+                }
+                if let banner = session.banner, banner.isEmpty == false {
+                    Text(banner)
+                        .font(Typeface.secondary)
+                        .foregroundStyle(Theme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(Theme.cardPadding)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Theme.radius, style: .continuous)
+                                .strokeBorder(Theme.line, lineWidth: 1)
+                        )
+                }
+                if session.reposts.isEmpty == false {
+                    lastReposts
+                } else if session.isWorking || awaitingFirstScan {
+                    VStack(spacing: 8) {
+                        SkeletonRow()
+                        SkeletonRow()
+                        SkeletonRow()
+                    }
+                }
+                if session.debugDetail.isEmpty == false {
+                    debugDetail
+                }
+                Text(LegalCopy.removals)
+                    .font(Typeface.caption)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, Theme.margin)
+            .padding(.bottom, 12)
+            .readableColumn()
+        }
+        .background(Theme.canvas.ignoresSafeArea())
+        .refreshable {
+            await session.loadReposts()
+        }
+    }
+
+    private var progress: some View {
+        VStack(spacing: 0) {
+            topBar
+                .padding(.horizontal, Theme.margin)
+                .readableColumn()
+            if showingSuccess && runner.isRunning == false {
+                successBody
+            } else {
+                runningBody
+            }
+        }
+        .background(ScreenBackdrop())
+        .toolbar(.hidden, for: .navigationBar)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            BottomBar {
+                if showingSuccess && runner.isRunning == false {
+                    PrimaryButton(title: "Done") {
+                        showingSuccess = false
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        QuietButton(title: runner.isPaused ? "Resume" : "Pause", systemImage: runner.isPaused ? "play.fill" : "pause.fill") {
+                            runner.togglePause()
+                        }
+                        QuietButton(title: "Stop", systemImage: "stop.fill") {
+                            confirmStop = true
+                        }
+                    }
                 }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 8)
+        }
+    }
 
-            if runner.current != nil {
-                Text(runner.current?.titleLine ?? "")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.muted)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity)
+    private var runningBody: some View {
+        VStack(spacing: 24) {
+            Spacer(minLength: 12)
+            MetricRing(progress: ringProgress) {
+                VStack(spacing: 2) {
+                    RollingNumber(value: Double(runner.remainingCount))
+                        .frame(maxWidth: 160)
+                        .animation(Motion.spring, value: runner.remainingCount)
+                    Text("left")
+                        .font(Typeface.caption)
+                        .foregroundStyle(Theme.muted)
+                }
             }
+            .frame(width: 240, height: 240)
+            .accessibilityLabel("\(runner.remainingCount) left")
+            Text(runner.statusText.isEmpty ? "Removing" : runner.statusText)
+                .font(Typeface.body)
+                .foregroundStyle(Theme.ink)
+                .multilineTextAlignment(.center)
+            if let title = runner.current?.titleLine, title.isEmpty == false {
+                Text(title)
+                    .font(Typeface.secondary)
+                    .foregroundStyle(Theme.muted)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+            Spacer(minLength: 12)
+        }
+        .padding(.horizontal, Theme.margin)
+        .readableColumn()
+    }
 
+    private var successBody: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 84, weight: .regular))
+                .foregroundStyle(Theme.success)
+                .accessibilityHidden(true)
+            Text("All caught up!")
+                .font(Typeface.largeTitle)
+                .foregroundStyle(Theme.ink)
+                .multilineTextAlignment(.center)
+            Text("Those reposts are off your tab.")
+                .font(Typeface.body)
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+            Spacer()
+        }
+        .padding(.horizontal, Theme.margin)
+        .readableColumn()
+    }
+
+    private var ringProgress: Double? {
+        guard runner.total > 0 else { return nil }
+        return Double(runner.processed) / Double(runner.total)
+    }
+
+    private var repostList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text(allSelected ? "All selected" : "\(selectedItems.count) selected")
+                        .font(Typeface.secondary)
+                        .foregroundStyle(Theme.muted)
+                        .numericTextTransition()
+                    Spacer()
+                    Button(allSelected ? "Clear" : "Select all") {
+                        Haptics.select()
+                        if allSelected {
+                            selected.removeAll()
+                        } else {
+                            selected = Set(session.reposts.map(\.id))
+                        }
+                    }
+                    .font(Typeface.secondary)
+                    .foregroundStyle(Theme.ink)
+                    .disabled(runner.isRunning)
+                }
+                LazyVStack(spacing: 8) {
+                    ForEach(session.reposts) { item in
+                        RepostCard(
+                            item: item,
+                            image: session.thumbnails[item.id],
+                            selected: selected.contains(item.id),
+                            active: runner.current?.id == item.id,
+                            showsSelection: true
+                        ) {
+                            toggle(item.id)
+                        }
+                        .task(id: item.id) {
+                            await session.loadThumbnail(for: item)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.margin)
+            .padding(.top, 8)
+            .padding(.bottom, 12)
+            .readableColumn()
+        }
+        .background(Theme.canvas.ignoresSafeArea())
+        .navigationTitle("Reposts")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbarBackground(Theme.canvas, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .refreshable {
+            await session.loadReposts()
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            BottomBar {
+                PrimaryButton(
+                    title: selectedItems.isEmpty ? "Select reposts" : "Remove \(selectedItems.count)",
+                    enabled: selectedItems.isEmpty == false
+                ) {
+                    prepare(all: false)
+                }
+                .matchedGeometryEffect(id: "selectionBar", in: selectionBar, isSource: showList)
+            }
+        }
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            MarkView(size: 28)
+            Text("Repost Sweep")
+                .font(Typeface.title)
+                .foregroundStyle(Theme.ink)
+            Spacer()
+            IconChip(systemName: "gearshape") {
+                showSettings = true
+            }
+            .accessibilityLabel("Settings")
+        }
+        .padding(.top, 8)
+    }
+
+    private var countBlock: some View {
+        VStack(spacing: 16) {
+            if showCaughtUp {
+                VStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 72))
+                        .foregroundStyle(Theme.success)
+                    Text("All caught up!")
+                        .font(Typeface.largeTitle)
+                        .foregroundStyle(Theme.ink)
+                    Text("Nothing left on the repost tab.")
+                        .font(Typeface.body)
+                        .foregroundStyle(Theme.muted)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            } else {
+                MetricRing(progress: session.isWorking && session.reposts.isEmpty ? nil : 1) {
+                    VStack(spacing: 2) {
+                        if signedIn == false {
+                            Text("—")
+                                .font(Typeface.hero)
+                                .foregroundStyle(Theme.ink)
+                        } else if awaitingFirstScan || (session.isWorking && session.reposts.isEmpty) {
+                            Text("…")
+                                .font(Typeface.hero)
+                                .foregroundStyle(Theme.ink)
+                        } else {
+                            RollingNumber(value: Double(session.reposts.count))
+                                .frame(maxWidth: 160)
+                                .animation(Motion.spring, value: session.reposts.count)
+                        }
+                        Text(heroCaption)
+                            .font(Typeface.caption)
+                            .foregroundStyle(Theme.muted)
+                    }
+                }
+                .frame(width: 230, height: 230)
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel("\(session.reposts.count) reposts")
+            }
             Button {
                 showHistory = true
             } label: {
                 Text("\(history.lifetimeRemoved) removed")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.ink)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Theme.surface)
-                    .clipShape(Capsule())
+                    .font(Typeface.caption)
+                    .foregroundStyle(Theme.muted)
+                    .numericTextTransition()
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(history.lifetimeRemoved) removed. Open history.")
         }
     }
 
-    private var heroValue: String {
-        if signedIn == false {
-            return "—"
-        }
-        if runner.isRunning {
-            return "\(runner.remainingCount)"
-        }
-        if awaitingFirstScan || (session.isWorking && session.reposts.isEmpty) {
-            return "…"
-        }
-        return "\(session.reposts.count)"
-    }
-
     private var heroCaption: String {
-        if signedIn == false {
-            return "Not signed in"
-        }
-        if runner.isRunning || runner.isPaused {
-            return runner.statusText.isEmpty ? "Removing" : runner.statusText
-        }
         if awaitingFirstScan || session.isWorking {
-            return session.statusText.isEmpty ? "Looking for reposts" : session.statusText
+            return session.statusText.isEmpty ? "Looking" : session.statusText
         }
-        if showCaughtUp {
-            return "All caught up"
-        }
-        return "reposts left"
+        return session.reposts.count == 1 ? "repost" : "reposts"
     }
 
     private var accountCard: some View {
@@ -299,20 +520,20 @@ struct HomeView: View {
                     fallback: session.account?.nickname.isEmpty == false
                         ? (session.account?.nickname ?? "")
                         : (session.account?.uniqueId ?? "T"),
-                    size: 46
+                    size: 52
                 )
                 VStack(alignment: .leading, spacing: 2) {
                     Text(accountTitle)
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
                         .foregroundStyle(Theme.ink)
                         .lineLimit(1)
                     Text(accountSubtitle)
-                        .font(.system(size: 13))
+                        .font(Typeface.caption)
                         .foregroundStyle(Theme.muted)
                         .lineLimit(1)
                     if let stats = session.account?.statsLine {
                         Text(stats)
-                            .font(.system(size: 13))
+                            .font(Typeface.caption)
                             .foregroundStyle(Theme.muted)
                             .lineLimit(1)
                     }
@@ -322,8 +543,8 @@ struct HomeView: View {
                     Haptics.tap()
                     confirmSignOut = true
                 }
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.pink)
+                .font(Typeface.caption)
+                .foregroundStyle(Theme.ink)
             }
         }
     }
@@ -348,17 +569,70 @@ struct HomeView: View {
         return "Loading profile"
     }
 
-    private var signedOutCard: some View {
-        SurfaceCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Continue with TikTok")
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+    private var lastReposts: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Last reposts")
+                    .font(Typeface.title)
                     .foregroundStyle(Theme.ink)
-                Text(LegalCopy.password)
-                    .font(.subheadline)
+                Spacer()
+                Button("View all") {
+                    withAnimation(Motion.spring) {
+                        showList = true
+                    }
+                }
+                .font(Typeface.secondary)
+                .foregroundStyle(Theme.ink)
+            }
+            ForEach(Array(session.reposts.prefix(3))) { item in
+                RepostCard(
+                    item: item,
+                    image: session.thumbnails[item.id],
+                    selected: false,
+                    active: false,
+                    showsSelection: false
+                ) {
+                    withAnimation(Motion.spring) {
+                        showList = true
+                    }
+                }
+                .task(id: item.id) {
+                    await session.loadThumbnail(for: item)
+                }
+            }
+        }
+    }
+
+    private var debugDetail: some View {
+        SurfaceCard {
+            DisclosureGroup {
+                Text(session.debugDetail)
+                    .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                loginControl
+                    .textSelection(.enabled)
+                    .padding(.top, 6)
+            } label: {
+                Text("Detail")
+                    .font(Typeface.caption)
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var dashboardActions: some View {
+        if session.isWorking || awaitingFirstScan {
+            PrimaryButton(title: "Looking for reposts", systemImage: "hourglass", enabled: false) {}
+        } else if session.reposts.isEmpty {
+            PrimaryButton(title: "Scan again", systemImage: "arrow.clockwise") {
+                Task { await session.loadReposts() }
+            }
+        } else {
+            QuietButton(title: "Refresh", systemImage: "arrow.clockwise") {
+                Task { await session.loadReposts() }
+            }
+            PrimaryButton(title: "Remove all", systemImage: "trash") {
+                prepare(all: true)
             }
         }
     }
@@ -371,134 +645,15 @@ struct HomeView: View {
         }
     }
 
-    private var debugDetail: some View {
-        DisclosureGroup {
-            Text(session.debugDetail)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(Theme.muted)
-                .textSelection(.enabled)
-                .padding(.top, 6)
-        } label: {
-            Text("Detail")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.muted)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-    }
-
-    private var listHeader: some View {
-        HStack {
-            Text("Reposts")
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(Theme.ink)
-            Spacer()
-            Button {
-                Haptics.select()
-                if allSelected {
-                    selected.removeAll()
-                } else {
-                    selected = Set(session.reposts.map(\.id))
-                }
-            } label: {
-                Text(selectedItems.isEmpty ? "Select all" : "\(selectedItems.count) selected")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.pink)
-            }
-            .disabled(runner.isRunning)
-        }
-        .padding(.top, 4)
-    }
-
-    private var loadingRows: some View {
-        VStack(spacing: 8) {
-            ForEach(0..<4, id: \.self) { _ in
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Theme.surface)
-                    .frame(height: 74)
-            }
-        }
-    }
-
-    private var caughtUp: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 28))
-                .foregroundStyle(Theme.success)
-            Text("Nothing left on the repost tab.")
-                .font(.subheadline)
-                .foregroundStyle(Theme.muted)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-    }
-
-    private var actionBar: some View {
-        VStack(spacing: 8) {
-            if signedIn == false {
-                loginControl
-            } else if runner.isRunning {
-                HStack(spacing: 10) {
-                    QuietButton(title: runner.isPaused ? "Resume" : "Pause") {
-                        runner.togglePause()
-                    }
-                    FilledButton(title: "Stop", fill: Theme.raised) {
-                        confirmStop = true
-                    }
-                }
-            } else if session.isWorking || awaitingFirstScan {
-                PrimaryButton(title: "Looking for reposts", systemImage: "hourglass", enabled: false) {}
-            } else if session.reposts.isEmpty {
-                PrimaryButton(title: "Scan again", systemImage: "arrow.clockwise") {
-                    Task { await session.loadReposts() }
-                }
-            } else {
-                HStack(spacing: 10) {
-                    QuietButton(title: "Refresh", systemImage: "arrow.clockwise") {
-                        Task { await session.loadReposts() }
-                    }
-                    PrimaryButton(
-                        title: removeTitle,
-                        systemImage: "trash",
-                        enabled: true
-                    ) {
-                        prepare(all: selectedItems.isEmpty || allSelected)
-                    }
-                }
-                if selectedItems.isEmpty == false && allSelected == false {
-                    Button("Remove all") {
-                        prepare(all: true)
-                    }
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.pink)
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .background(Theme.canvas.ignoresSafeArea())
-        .overlay(alignment: .top) {
-            Rectangle().fill(Theme.line).frame(height: 1)
-        }
-    }
-
-    private var removeTitle: String {
-        if selectedItems.isEmpty || allSelected {
-            return "Remove all"
-        }
-        return "Remove selected"
-    }
-
     private func toggle(_ id: String) {
         guard runner.isRunning == false else { return }
         Haptics.select()
-        if selected.contains(id) {
-            selected.remove(id)
-        } else {
-            selected.insert(id)
+        withAnimation(Motion.spring) {
+            if selected.contains(id) {
+                selected.remove(id)
+            } else {
+                selected.insert(id)
+            }
         }
     }
 
@@ -527,75 +682,5 @@ struct HomeView: View {
             purchases: purchases,
             history: history
         )
-    }
-}
-
-private struct RepostRow: View {
-    var item: RepostItem
-    var image: UIImage?
-    var selected: Bool
-    var active: Bool
-    var onTap: () -> Void
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 12) {
-                thumb
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.author.isEmpty ? item.titleLine : "@\(item.author)")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Theme.ink)
-                        .lineLimit(1)
-                    Text(caption)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.muted)
-                        .lineLimit(2)
-                    if active {
-                        Text("Removing")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.pink)
-                    }
-                }
-                Spacer(minLength: 8)
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(selected ? Theme.pink : Theme.muted)
-            }
-            .padding(10)
-            .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(active ? Theme.pink : Color.clear, lineWidth: 1.5)
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(item.titleLine)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    private var caption: String {
-        let trimmed = item.caption.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty == false {
-            return trimmed
-        }
-        return "Repost"
-    }
-
-    private var thumb: some View {
-        ZStack {
-            Theme.raised
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(Theme.muted)
-            }
-        }
-        .frame(width: 56, height: 74)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
