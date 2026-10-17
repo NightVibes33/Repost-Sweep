@@ -153,27 +153,12 @@ struct AppGlyph: View {
     var size: CGFloat = 88
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .fill(Theme.canvasRaised)
-            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .strokeBorder(Theme.line, lineWidth: max(1, size * 0.015))
-            Circle()
-                .trim(from: 0.06, to: 0.40)
-                .stroke(Theme.cyan, style: StrokeStyle(lineWidth: size * 0.055, lineCap: .round))
-                .rotationEffect(.degrees(-30))
-                .frame(width: size * 0.52, height: size * 0.52)
-            Circle()
-                .trim(from: 0.06, to: 0.40)
-                .stroke(Theme.pink, style: StrokeStyle(lineWidth: size * 0.055, lineCap: .round))
-                .rotationEffect(.degrees(150))
-                .frame(width: size * 0.52, height: size * 0.52)
-            Image(systemName: "xmark")
-                .font(.system(size: size * 0.2, weight: .bold))
-                .foregroundStyle(Theme.ink)
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+        Image("AppMark")
+            .resizable()
+            .scaledToFill()
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: size * 0.2237, style: .continuous))
+            .accessibilityHidden(true)
     }
 }
 

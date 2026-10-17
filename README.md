@@ -177,4 +177,4 @@ RepostSweep/Resources/TikTokBridge.js
 RepostSweep/Assets.xcassets         Icon and launch color
 ```
 
-Regenerate the icon with `python3 scripts/render-icon.py` if you want a different mark. It uses only the Python standard library.
+The app icon is the opaque artwork in `RepostSweep/Assets.xcassets/AppIcon.appiconset`. `scripts/render-icon.py` does not draw or replace those files.
