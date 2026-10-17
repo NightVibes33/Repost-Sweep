@@ -164,7 +164,6 @@ enum RemovalAttempt: Equatable {
     case removed
     case rateLimited
     case notLoggedIn
-    case siteChanged(String)
     case failed(String)
 }
 

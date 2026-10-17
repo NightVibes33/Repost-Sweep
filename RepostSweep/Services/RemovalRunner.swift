@@ -12,7 +12,6 @@ final class RemovalRunner: ObservableObject {
     @Published private(set) var isFinished = false
     @Published private(set) var needsPaywall = false
     @Published private(set) var statusText = ""
-    @Published private(set) var siteChangeDetail: String?
 
     private var stopRequested = false
     private let spacingRange: ClosedRange<TimeInterval> = 2.2...3.4
@@ -53,7 +52,6 @@ final class RemovalRunner: ObservableObject {
         isPaused = false
         isFinished = false
         needsPaywall = false
-        siteChangeDetail = nil
         stopRequested = false
         statusText = "Starting"
         session.debugDetail = ""
@@ -110,21 +108,9 @@ final class RemovalRunner: ObservableObject {
                 session.notice = SweepNotice(
                     title: "TikTok signed you out",
                     message: "The session expired before this repost could be removed. Log in again, then retry the rest. Original videos were not deleted.",
-                    debugHint: "NOT_LOGGED_IN",
                     suggestLogin: true
                 )
                 statusText = "Signed out"
-                stopRequested = true
-            case .siteChanged(let detail):
-                siteChangeDetail = detail
-                session.siteChangeMessage = detail
-                session.notice = SweepNotice(
-                    title: "TikTok changed this step",
-                    message: "Removal stopped so nothing else was guessed. Reposts that already went through are done. Original videos were not deleted.",
-                    debugHint: detail
-                )
-                history.record(item: item, removed: false, detail: "Page changed")
-                statusText = "Stopped"
                 stopRequested = true
             case .failed(let detail):
                 failed += 1
@@ -146,16 +132,19 @@ final class RemovalRunner: ObservableObject {
 
         current = nil
         session.removalActive = false
+        if completed > 0 {
+            await session.loadReposts()
+        }
         session.parkWebView()
         isRunning = false
         isFinished = true
         isPaused = false
-        if siteChangeDetail == nil, needsPaywall == false, session.notice == nil {
-            if completed > 0 && failed == 0 {
+        if needsPaywall == false, session.notice == nil {
+            if completed > 0 && session.reposts.isEmpty {
                 session.banner = "Removed \(completed) from your repost tab."
                 statusText = "Removed \(completed)"
             } else if completed > 0 {
-                session.banner = "Removed \(completed). \(failed) stayed on the tab."
+                session.banner = "Checked the list again. \(session.reposts.count) still on the tab."
                 statusText = "Removed \(completed)"
             } else if stopRequested {
                 statusText = "Stopped"
@@ -163,9 +152,9 @@ final class RemovalRunner: ObservableObject {
                 statusText = ""
             }
         }
-        if completed > 0 && siteChangeDetail == nil {
+        if completed > 0 && session.reposts.isEmpty {
             Haptics.success()
-        } else if failed > 0 || siteChangeDetail != nil {
+        } else if failed > 0 {
             Haptics.warning()
         }
     }
@@ -173,10 +162,16 @@ final class RemovalRunner: ObservableObject {
     private func removeWithRetry(item: RepostItem, session: TikTokWebSession) async -> RemovalAttempt {
         let first = await session.remove(itemId: item.id)
         switch first {
-        case .rateLimited, .failed:
+        case .rateLimited:
             await sleep(rateLimitBackoff...rateLimitBackoff)
             if stopRequested { return first }
-            return await session.remove(itemId: item.id)
+            return await session.retryDelete(itemId: item.id)
+        case .failed:
+            await sleep(3...5)
+            if stopRequested { return first }
+            let again = await session.recheck(itemId: item.id)
+            if case .removed = again { return again }
+            return first
         default:
             return first
         }

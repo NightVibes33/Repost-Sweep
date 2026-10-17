@@ -35,7 +35,7 @@ struct SettingsView: View {
                             }
                         }
                     } else if session.hasSessionCookie {
-                        Text("Signed in. Profile still loading.")
+                        Text("Looking up the TikTok profile.")
                             .font(Typeface.body)
                             .foregroundStyle(Theme.muted)
                     } else {
@@ -92,7 +92,7 @@ struct SettingsView: View {
                 .listRowBackground(Theme.card)
 
                 Section {
-                    Button("Show onboarding") {
+                    Button("Replay intro") {
                         replayOnboarding = true
                         dismiss()
                     }

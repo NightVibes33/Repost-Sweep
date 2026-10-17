@@ -170,28 +170,6 @@ struct MarkView: View {
     }
 }
 
-struct TikTokMark: View {
-    var size: CGFloat = 22
-
-    var body: some View {
-        ZStack {
-            Image(systemName: "music.note")
-                .font(.system(size: size, weight: .bold))
-                .foregroundStyle(Theme.cyan)
-                .offset(x: -1.2, y: -1)
-            Image(systemName: "music.note")
-                .font(.system(size: size, weight: .bold))
-                .foregroundStyle(Theme.pink)
-                .offset(x: 1.2, y: 1)
-            Image(systemName: "music.note")
-                .font(.system(size: size, weight: .bold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: size + 6, height: size + 6)
-        .accessibilityHidden(true)
-    }
-}
-
 struct ContinueWithTikTokButton: View {
     var action: () -> Void
 
@@ -231,9 +209,9 @@ struct TikTokLoginControl: View {
         case .idle:
             ContinueWithTikTokButton(action: onStart)
         case .loading:
-            waiting(title: "Opening TikTok…")
+            waiting(title: "Opening TikTok…", hint: false)
         case .waiting:
-            waiting(title: finishing ? "Finishing sign-in…" : "Waiting for TikTok…")
+            waiting(title: finishing ? "Finishing sign-in…" : "Waiting for TikTok…", hint: true)
         case .failed(let message):
             VStack(alignment: .leading, spacing: 12) {
                 ScrollView {
@@ -249,13 +227,21 @@ struct TikTokLoginControl: View {
         }
     }
 
-    private func waiting(title: String) -> some View {
+    private func waiting(title: String, hint: Bool) -> some View {
         VStack(spacing: 12) {
             ProgressView()
                 .tint(Theme.ink)
             Text(title)
                 .font(Typeface.secondary)
                 .foregroundStyle(Theme.ink)
+                .multilineTextAlignment(.center)
+            if hint {
+                Text("After you approve, tap ◀ Repost Sweep at the top left.")
+                    .font(Typeface.caption)
+                    .foregroundStyle(Theme.muted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Button("Cancel", action: onCancel)
                 .font(Typeface.secondary)
                 .foregroundStyle(Theme.muted)
@@ -544,6 +530,7 @@ struct SweepErrorCard: View {
                         .font(Typeface.secondary)
                         .foregroundStyle(Theme.pink)
                 }
+                #if DEBUG_UI
                 Button("View page", action: onViewPage)
                     .font(Typeface.caption)
                     .foregroundStyle(Theme.muted)
@@ -560,6 +547,7 @@ struct SweepErrorCard: View {
                             .foregroundStyle(Theme.muted)
                     }
                 }
+                #endif
             }
         }
     }
@@ -602,6 +590,39 @@ struct RepostCard: View {
                 RoundedRectangle(cornerRadius: Theme.radius, style: .continuous)
                     .strokeBorder(selected || active ? Theme.pink.opacity(0.85) : Theme.line, lineWidth: 1)
             )
+        }
+        .buttonStyle(PressScaleStyle())
+        .accessibilityLabel(item.titleLine)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+struct RepostTile: View {
+    var item: RepostItem
+    var image: UIImage?
+    var selected: Bool
+    var selecting: Bool
+    var onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            Color.clear
+                .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                .overlay {
+                    CoverImage(urlString: item.coverURL, fallback: image, width: 400, height: 534)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(selected && selecting ? Theme.pink.opacity(0.9) : Theme.line, lineWidth: 1)
+                )
+                .overlay(alignment: .topTrailing) {
+                    if selecting {
+                        SelectionCircle(selected: selected)
+                            .padding(6)
+                            .background(.black.opacity(0.28), in: Circle())
+                    }
+                }
         }
         .buttonStyle(PressScaleStyle())
         .accessibilityLabel(item.titleLine)

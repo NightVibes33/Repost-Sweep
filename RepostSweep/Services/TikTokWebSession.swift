@@ -1,6 +1,5 @@
 import AVFoundation
 import Combine
-import ObjectiveC
 import os
 import SwiftUI
 import WebKit
@@ -23,7 +22,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
     @Published var isPageLoading = false
     @Published var loginProgress: Double = 0
     @Published var pageError: String?
-    @Published var siteChangeMessage: String?
     @Published var notice: SweepNotice?
     @Published var thumbnails: [String: UIImage] = [:]
     @Published var removalActive = false
@@ -36,7 +34,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
     private let handoffLog = Logger(subsystem: "app.repostsweep.ios", category: "handoff")
     private let gate = JSGate()
     private var progressObservation: NSKeyValueObservation?
-    private var activeObserver: AnyCancellable?
     private var resignObserver: AnyCancellable?
     private var didWarmUp = false
     private var didAdopt = false
@@ -46,7 +43,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
     private var didOpenHandoff = false
     private var didLeaveApp = false
     private var appLoginInFlight = false
-    private var lastBlockedURL = ""
     private var lastHandoffReport = ""
     private var didReloadForReturn = false
     private var handoffWatch: Task<Void, Never>?
@@ -63,13 +59,13 @@ final class TikTokWebSession: NSObject, ObservableObject {
         preferences.allowsContentJavaScript = true
         preferences.preferredContentMode = .mobile
         configuration.defaultWebpagePreferences = preferences
-        configuration.allowsInlineMediaPlayback = false
+        configuration.allowsInlineMediaPlayback = true
         configuration.allowsPictureInPictureMediaPlayback = false
         configuration.mediaTypesRequiringUserActionForPlayback = .all
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         try? AVAudioSession.sharedInstance().setCategory(.ambient, options: [.mixWithOthers])
         try? AVAudioSession.sharedInstance().setActive(true)
-        let world = ScriptWorld.page
+        let world = WKContentWorld.page
         let hideBanners = WKUserScript(
             source: Self.bannerHideScript,
             injectionTime: .atDocumentStart,
@@ -131,11 +127,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
                 }
             }
         }
-        activeObserver = NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.appBecameActive()
-            }
         resignObserver = NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -169,7 +160,9 @@ final class TikTokWebSession: NSObject, ObservableObject {
     }
 
     func openDebugPage() {
+        #if DEBUG_UI
         showingDebugPage = true
+        #endif
     }
 
     func refreshAccount() async {
@@ -200,10 +193,13 @@ final class TikTokWebSession: NSObject, ObservableObject {
 
         isWorking = true
         banner = nil
-        siteChangeMessage = nil
         notice = nil
+        #if DEBUG_UI
         let preservedHandoff = lastHandoffReport
         debugDetail = preservedHandoff
+        #else
+        debugDetail = ""
+        #endif
         statusText = "Looking for reposts"
         defer {
             if token == generation {
@@ -213,7 +209,9 @@ final class TikTokWebSession: NSObject, ObservableObject {
             }
         }
 
-        await ensureHomePage()
+        await refreshAccount()
+        guard token == generation else { return }
+        await ensureWorkingPage()
         guard token == generation else { return }
         await refreshAccount()
         guard token == generation else { return }
@@ -221,8 +219,8 @@ final class TikTokWebSession: NSObject, ObservableObject {
             statusText = ""
             if cookie {
                 notice = SweepNotice(
-                    title: "Signed in, profile still loading",
-                    message: "TikTok accepted the session, but didn’t share a username yet. Retry in a moment.",
+                    title: "Profile still loading",
+                    message: "TikTok hasn’t shared a username yet. Retry in a moment.",
                     debugHint: "NO_ACCOUNT",
                     suggestLogin: false
                 )
@@ -258,10 +256,9 @@ final class TikTokWebSession: NSObject, ObservableObject {
                 if collected.isEmpty {
                     notice = SweepNotice(
                         title: "TikTok changed this step",
-                        message: "The repost list didn’t match what this version expects, so nothing was guessed. Retry, or check the page if it keeps happening.",
+                        message: "The repost list didn’t match what this version expects, so nothing was guessed. Retry in a moment.",
                         debugHint: api.failureDetail
                     )
-                    siteChangeMessage = api.failureDetail
                 } else {
                     banner = "TikTok’s list changed. These are the videos visible on your profile. Removal can still fail until the app is updated."
                 }
@@ -270,11 +267,10 @@ final class TikTokWebSession: NSObject, ObservableObject {
             statusText = "Reading the reposts tab"
             collected = await scrapeDom(uniqueId: current.uniqueId)
             if collected.isEmpty {
-                let detail = "NO_SEC_UID. TikTok didn’t include the account id this app uses to read reposts."
-                siteChangeMessage = detail
+                let detail = "NO_SEC_UID"
                 notice = SweepNotice(
                     title: "Couldn’t read the repost tab",
-                    message: "TikTok didn’t include the account id this version needs. Retry, or look at the page to see what loaded.",
+                    message: "TikTok didn’t include the account id this version needs. Retry in a moment.",
                     debugHint: detail
                 )
             }
@@ -287,7 +283,7 @@ final class TikTokWebSession: NSObject, ObservableObject {
 
     func remove(itemId: String) async -> RemovalAttempt {
         let token = generation
-        await ensureHomePage()
+        await ensureWorkingPage()
         silencePlayback(on: webView)
         guard token == generation else { return .notLoggedIn }
         let api = await apiRemoval(itemId)
@@ -302,9 +298,9 @@ final class TikTokWebSession: NSObject, ObservableObject {
             break
         }
         guard token == generation else { return .notLoggedIn }
-        let tapped = await uiRemoval(itemId: itemId, prior: attemptDetail(api))
-        if case .rateLimited = tapped { return tapped }
-        if case .notLoggedIn = tapped { return tapped }
+        let pause = UInt64(Double.random(in: 3...5) * 1_000_000_000)
+        try? await Task.sleep(nanoseconds: pause)
+        guard token == generation else { return .notLoggedIn }
         switch await confirmRemoved(itemId) {
         case .gone:
             return .removed
@@ -313,21 +309,43 @@ final class TikTokWebSession: NSObject, ObservableObject {
         case .stillThere:
             break
         }
-        let prior = attemptDetail(tapped)
-        let fallback = prior.isEmpty ? attemptDetail(api) : prior
-        return .failed(fallback.isEmpty ? "Still on the repost list after both attempts." : "Still on the repost list. \(fallback)")
+        guard token == generation else { return .notLoggedIn }
+        let tapped = await uiRemoval(itemId: itemId)
+        if case .rateLimited = tapped { return tapped }
+        if case .notLoggedIn = tapped { return tapped }
+        switch await confirmRemoved(itemId) {
+        case .gone:
+            return .removed
+        case .blocked(let attempt):
+            return attempt
+        case .stillThere:
+            return .failed("That repost is still on the list.")
+        }
     }
 
-    private func attemptDetail(_ attempt: RemovalAttempt) -> String {
-        switch attempt {
-        case .failed(let detail), .siteChanged(let detail):
-            return detail
-        case .removed:
-            return ""
-        case .rateLimited:
-            return "RATE_LIMITED"
-        case .notLoggedIn:
-            return "NOT_LOGGED_IN"
+    /// A second delete request with no page tap, so a retry cannot turn the repost back on.
+    func retryDelete(itemId: String) async -> RemovalAttempt {
+        let api = await apiRemoval(itemId)
+        if case .rateLimited = api { return api }
+        if case .notLoggedIn = api { return api }
+        switch await confirmRemoved(itemId) {
+        case .gone:
+            return .removed
+        case .blocked(let attempt):
+            return attempt
+        case .stillThere:
+            return .failed("TikTok didn’t take that repost off.")
+        }
+    }
+
+    func recheck(itemId: String) async -> RemovalAttempt {
+        switch await confirmRemoved(itemId) {
+        case .gone:
+            return .removed
+        case .blocked(let attempt):
+            return attempt
+        case .stillThere:
+            return .failed("That repost is still on the list.")
         }
     }
 
@@ -374,7 +392,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
         reposts = []
         thumbnails = [:]
         banner = nil
-        siteChangeMessage = nil
         notice = nil
         debugDetail = ""
         showingDebugPage = false
@@ -407,7 +424,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
         didOpenHandoff = false
         didLeaveApp = false
         appLoginInFlight = false
-        lastBlockedURL = ""
         lastHandoffReport = ""
         didReloadForReturn = false
         foregroundAccumulated = 0
@@ -458,7 +474,9 @@ final class TikTokWebSession: NSObject, ObservableObject {
             let envelope = try await invoke(.openAppLogin, payload: [:])
             guard token == loginGeneration, expectingHandoff else { return }
             if envelope.message.isEmpty == false {
+                #if DEBUG_UI
                 noteDebug("Bridge login result: \(envelope.message)", limit: 8000)
+                #endif
                 logHandoffLine("bridge", envelope.message)
             }
             if didOpenHandoff { return }
@@ -467,7 +485,7 @@ final class TikTokWebSession: NSObject, ObservableObject {
                     handleExternalURL(url)
                 }
                 if didOpenHandoff == false {
-                    scheduleHandoffTimeout(token: token, tapped: envelope.message)
+                    scheduleHandoffTimeout(token: token)
                 }
             } else {
                 let message = envelope.message.isEmpty
@@ -497,20 +515,13 @@ final class TikTokWebSession: NSObject, ObservableObject {
         return nil
     }
 
-    private func scheduleHandoffTimeout(token: Int, tapped: String) {
+    private func scheduleHandoffTimeout(token: Int) {
         handoffWatch?.cancel()
         handoffWatch = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 25_000_000_000)
             guard Task.isCancelled == false else { return }
             guard token == self.loginGeneration, self.expectingHandoff, self.didOpenHandoff == false else { return }
-            var message = "Tapped Log in with TikTok app, but no tiktok://, snssdk1233://, or snssdk1128:// link arrived."
-            if tapped.isEmpty == false {
-                message = "\(tapped) No tiktok://, snssdk1233://, or snssdk1128:// link arrived."
-            }
-            if self.lastBlockedURL.isEmpty == false {
-                message += " Last non-web navigation: \(self.lastBlockedURL)."
-            }
-            self.failLogin(message)
+            self.failLogin("TikTok didn’t open its app login. Try again.")
         }
     }
 
@@ -520,8 +531,11 @@ final class TikTokWebSession: NSObject, ObservableObject {
         didOpenHandoff = false
         isFinishingReturn = false
         stopLoginWatch()
-        pageError = message
-        appLoginPhase = .failed(message)
+        let shown = message.contains("://")
+            ? "TikTok didn’t finish signing you in. After you approve, tap ◀ Repost Sweep at the top left."
+            : message
+        pageError = shown
+        appLoginPhase = .failed(shown)
     }
 
     private func beginReturnWatch() {
@@ -536,13 +550,7 @@ final class TikTokWebSession: NSObject, ObservableObject {
                     return
                 }
                 if self.foregroundElapsed() > 45 {
-                    var message = self.didLeaveApp
-                        ? "Returned from TikTok, but no session cookie (sessionid, sessionid_ss, or sid_tt) was set."
-                        : "TikTok’s app link was opened, but this app stayed in the foreground and no session cookie (sessionid, sessionid_ss, or sid_tt) was set."
-                    if self.lastHandoffReport.isEmpty == false {
-                        message += " " + self.lastHandoffReport
-                    }
-                    self.failLogin(message)
+                    self.failLogin("TikTok didn’t finish signing you in. After you approve, tap ◀ Repost Sweep at the top left.")
                     return
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -577,16 +585,12 @@ final class TikTokWebSession: NSObject, ObservableObject {
         }
         isFinishingReturn = true
         noteDebug("App became active during sign-in. Polling for a session with no extra tap.")
-        logHandoffLine("active", "became active while waiting. \(lastHandoffReport)")
         Task { await self.finishLoginOnReturn() }
     }
 
     func handleAuthCallback(_ url: URL) {
         guard Self.isAuthReturn(url) else { return }
-        guard appLoginPhase == .waiting || expectingHandoff else {
-            noteDebug("Ignored \(url.absoluteString) because sign-in was not waiting.")
-            return
-        }
+        guard appLoginPhase == .waiting || expectingHandoff else { return }
         expectingHandoff = false
         didOpenHandoff = true
         didLeaveApp = true
@@ -596,39 +600,40 @@ final class TikTokWebSession: NSObject, ObservableObject {
         if returnWatch == nil {
             beginReturnWatch()
         }
-        noteDebug("TikTok returned to \(url.absoluteString)")
         Task { await self.finishLoginOnReturn() }
-    }
-
-    private func appBecameActive() {
-        sceneBecameActive()
     }
 
     private func finishLoginOnReturn() async {
         let token = loginGeneration
         guard appLoginPhase == .waiting else { return }
         isFinishingReturn = true
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            if await refreshSessionCookie() {
+                adoptSession()
+                return
+            }
+            guard token == loginGeneration, appLoginPhase == .waiting else { return }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        guard token == loginGeneration, appLoginPhase == .waiting else { return }
+        if didReloadForReturn == false {
+            didReloadForReturn = true
+            noteDebug("No session cookie yet. Reloading the login page once.")
+            webView.customUserAgent = TikTokURL.mobileSafari
+            silencePlayback(on: webView)
+            webView.load(URLRequest(url: TikTokURL.login))
+            await waitForSettle()
+            silencePlayback(on: webView)
+        }
+        guard token == loginGeneration, appLoginPhase == .waiting else { return }
         for _ in 0..<8 {
             if await refreshSessionCookie() {
                 adoptSession()
                 return
             }
             guard token == loginGeneration, appLoginPhase == .waiting else { return }
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        guard token == loginGeneration, appLoginPhase == .waiting else { return }
-        if didReloadForReturn == false {
-            didReloadForReturn = true
-            noteDebug("No session cookie yet. Reloading tiktok.com once and polling again.")
-            webView.customUserAgent = TikTokURL.mobileSafari
-            silencePlayback(on: webView)
-            webView.load(URLRequest(url: TikTokURL.home))
-            await waitForSettle()
-            silencePlayback(on: webView)
-        }
-        guard token == loginGeneration, appLoginPhase == .waiting else { return }
-        if await refreshSessionCookie() {
-            adoptSession()
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
@@ -645,39 +650,31 @@ final class TikTokWebSession: NSObject, ObservableObject {
         let scheme = url.scheme?.lowercased() ?? ""
         let handoff = scheme == "tiktok" || scheme == "snssdk1233" || scheme == "snssdk1128"
         guard expectingHandoff else { return }
-        guard handoff else {
-            lastBlockedURL = url.absoluteString
-            return
-        }
+        guard handoff else { return }
         guard didOpenHandoff == false else { return }
         let token = loginGeneration
+        #if DEBUG_UI
+        lastHandoffReport = url.absoluteString
+        noteDebug(url.absoluteString, limit: 12000)
+        #endif
         logHandoffLine("captured", url.absoluteString)
-        let rewritten = rewriteReturnURL(url)
-        lastHandoffReport = rewritten.report
-        noteDebug(rewritten.report, limit: 12000)
-        logHandoffLine("rewritten", rewritten.url.absoluteString)
-        logHandoffLine("report", rewritten.report)
         didOpenHandoff = true
         expectingHandoff = false
         handoffWatch?.cancel()
         loadingWatch?.cancel()
         appLoginPhase = .waiting
         beginReturnWatch()
-        UIApplication.shared.open(rewritten.url, options: [:]) { success in
+        UIApplication.shared.open(url, options: [:]) { success in
             Task { @MainActor in
                 guard token == self.loginGeneration, self.appLoginPhase == .waiting else { return }
                 guard success == false else { return }
-                if UIApplication.shared.canOpenURL(rewritten.url) == false {
-                    self.failLogin("The TikTok app isn’t installed, so \(scheme):// could not be opened.")
+                if UIApplication.shared.canOpenURL(url) == false {
+                    self.failLogin("The TikTok app isn’t installed.")
                 } else {
-                    self.failLogin("iOS could not open \(scheme)://.")
+                    self.failLogin("iOS could not open the TikTok app.")
                 }
             }
         }
-    }
-
-    private func rewriteReturnURL(_ url: URL) -> (url: URL, report: String) {
-        HandoffRewriter.rewrite(url)
     }
 
     private func logHandoffLine(_ label: String, _ text: String) {
@@ -693,7 +690,7 @@ final class TikTokWebSession: NSObject, ObservableObject {
             let end = body.index(start, offsetBy: size, limitedBy: body.endIndex) ?? body.endIndex
             let chunk = String(body[start..<end])
             let part = index + 1
-            handoffLog.info("\(label, privacy: .public) [\(part)/\(total)] \(chunk, privacy: .public)")
+            handoffLog.info("\(label, privacy: .private) [\(part)/\(total)] \(chunk, privacy: .private)")
             start = end
             index += 1
         }
@@ -709,8 +706,10 @@ final class TikTokWebSession: NSObject, ObservableObject {
                 return .rateLimited
             case "NOT_LOGGED_IN":
                 return .notLoggedIn
+            case "OK":
+                return .failed("Delete request accepted.")
             default:
-                return .failed(detail)
+                return .failed("TikTok didn’t take that repost off.")
             }
         } catch {
             let detail = "The unrepost request didn’t answer."
@@ -729,7 +728,8 @@ final class TikTokWebSession: NSObject, ObservableObject {
         do {
             let envelope = try await invoke(.confirmRemoved, payload: [
                 "itemId": itemId,
-                "secUid": account?.secUid ?? ""
+                "secUid": account?.secUid ?? "",
+                "maxPages": 2
             ])
             let detail = envelope.message.isEmpty ? envelope.code : envelope.message
             noteDebug(detail)
@@ -741,6 +741,8 @@ final class TikTokWebSession: NSObject, ObservableObject {
                 return .blocked(.rateLimited)
             case "NOT_LOGGED_IN":
                 return .blocked(.notLoggedIn)
+            case "UNVERIFIED":
+                return .gone
             default:
                 return .stillThere
             }
@@ -750,27 +752,27 @@ final class TikTokWebSession: NSObject, ObservableObject {
         }
     }
 
-    private func uiRemoval(itemId: String, prior: String) async -> RemovalAttempt {
+    private func uiRemoval(itemId: String) async -> RemovalAttempt {
         let token = generation
         guard let uniqueId = account?.uniqueId, uniqueId.isEmpty == false else {
-            return .failed(prior.isEmpty ? "No TikTok username to open the video." : prior)
+            return .failed("TikTok didn’t share a username for that video.")
         }
         guard let url = TikTokURL.video(uniqueId, itemId) else {
-            return .failed(prior)
+            return .failed("That video couldn’t be opened.")
         }
         webView.load(URLRequest(url: url))
         await waitForSettle()
+        silencePlayback(on: webView)
         guard token == generation else { return .notLoggedIn }
         do {
             let envelope = try await invoke(.unrepostTap, payload: ["itemId": itemId])
-            let detail = envelope.message.isEmpty ? envelope.code : envelope.message
-            noteDebug(detail)
+            noteDebug(envelope.message.isEmpty ? envelope.code : envelope.message)
             if envelope.code == "NOT_LOGGED_IN" {
                 return .notLoggedIn
             }
-            return .failed(detail)
+            return .failed("Couldn’t find Remove repost.")
         } catch {
-            return .failed(prior.isEmpty ? "The video page didn’t answer." : prior)
+            return .failed("The video page didn’t answer.")
         }
     }
 
@@ -854,15 +856,24 @@ final class TikTokWebSession: NSObject, ObservableObject {
         return found
     }
 
-    private func ensureHomePage() async {
-        let host = webView.url?.host?.lowercased() ?? ""
-        let path = webView.url?.path.lowercased() ?? ""
-        let onSite = host.contains("tiktok.com")
-        let onLogin = path.contains("login")
-        if onSite == false || onLogin || webView.url == nil {
-            webView.load(URLRequest(url: TikTokURL.home))
-            await waitForSettle()
+    private func ensureWorkingPage() async {
+        if let uniqueId = account?.uniqueId, uniqueId.isEmpty == false {
+            let path = webView.url?.path.lowercased() ?? ""
+            let host = webView.url?.host?.lowercased() ?? ""
+            let onProfile = host.contains("tiktok.com") && (path == "/@\(uniqueId.lowercased())" || path.hasPrefix("/@\(uniqueId.lowercased())/"))
+            if onProfile == false {
+                await navigateToProfile(uniqueId)
+                silencePlayback(on: webView)
+            }
+            return
         }
+        let path = webView.url?.path.lowercased() ?? ""
+        let host = webView.url?.host?.lowercased() ?? ""
+        let onLanding = host.contains("tiktok.com") && (path == "/profile" || path.hasPrefix("/profile/"))
+        if onLanding { return }
+        webView.load(URLRequest(url: TikTokURL.profileLanding))
+        await waitForSettle()
+        silencePlayback(on: webView)
     }
 
     private struct APICollect {
@@ -1045,7 +1056,7 @@ final class TikTokWebSession: NSObject, ObservableObject {
             body,
             arguments: ["payload": payload],
             in: nil,
-            contentWorld: ScriptWorld.page
+            contentWorld: WKContentWorld.page
         )
         guard let value else {
             throw SessionError.emptyResult
@@ -1084,6 +1095,23 @@ final class TikTokWebSession: NSObject, ObservableObject {
 
     private static let silenceScript = """
     (function () {
+      function lockAudio(name) {
+        var Orig = window[name];
+        if (typeof Orig !== "function" || Orig.__rsLocked) return;
+        function SilentContext() {
+          var ctx = new Orig();
+          try { ctx.suspend(); } catch (error) {}
+          ctx.resume = function () {
+            try { ctx.suspend(); } catch (error) {}
+            return Promise.resolve();
+          };
+          return ctx;
+        }
+        SilentContext.__rsLocked = true;
+        window[name] = SilentContext;
+      }
+      lockAudio("AudioContext");
+      lockAudio("webkitAudioContext");
       function mute(el) {
         try {
           el.muted = true;
@@ -1169,25 +1197,6 @@ final class TikTokWebSession: NSObject, ObservableObject {
     }
 }
 
-private enum ScriptWorld {
-    static var page: WKContentWorld {
-        if let world = classProperty("pageWorld") ?? classProperty("page") {
-            return world
-        }
-        preconditionFailure("WKContentWorld has no page world")
-    }
-
-    private static func classProperty(_ name: String) -> WKContentWorld? {
-        let selector = NSSelectorFromString(name)
-        guard let method = class_getClassMethod(WKContentWorld.self, selector) else {
-            return nil
-        }
-        typealias Getter = @convention(c) (AnyClass, Selector) -> Unmanaged<WKContentWorld>
-        let getter = unsafeBitCast(method_getImplementation(method), to: Getter.self)
-        return getter(WKContentWorld.self, selector).takeUnretainedValue()
-    }
-}
-
 private enum BridgeCall: String {
     case detect
     case list
@@ -1200,270 +1209,10 @@ private enum BridgeCall: String {
     case confirmRemoved
 }
 
-private enum HandoffRewriter {
-    static let callback = "repostsweep://auth-callback"
-    static let universalCallback = "https://repostsweep.app/auth-callback"
-    private static let httpsReturnKeys: Set<String> = [
-        "redirect_uri", "return_url", "returnurl", "next", "next_url",
-        "callback_url", "fallback_url", "web_url", "success_url"
-    ]
-    private static let redirectKeys: Set<String> = [
-        "redirect_url", "redirect_uri", "redirect", "return_url", "returnurl",
-        "return_to", "next", "next_url", "callback", "callback_url", "fallback_url",
-        "web_url", "jump_url", "jump", "target_url",
-        "target", "landing_url", "landing", "continue", "continue_url", "dest",
-        "destination", "open_url", "deeplink", "deep_link", "back_url",
-        "success_url", "cancel_url"
-    ]
-    private static let originKeys: Set<String> = [
-        "from", "enter_from", "enterfrom", "source", "client", "open_from",
-        "referer", "referrer", "caller", "platform", "app_type"
-    ]
-    private static let webOrigins: Set<String> = [
-        "web", "h5", "browser", "safari", "wap", "www", "desktop", "pc", "tiktokweb"
-    ]
-    private static let containerKeys: Set<String> = [
-        "params_url", "schema", "params", "data", "payload", "state"
-    ]
-
-    static func rewrite(_ url: URL) -> (url: URL, report: String) {
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            return (url, "Handoff URL could not be parsed.\n\(url.absoluteString)")
-        }
-        var items = components.queryItems ?? []
-        var lines: [String] = []
-        lines.append("Handoff URL:")
-        lines.append(url.absoluteString)
-        lines.append("Parameters:")
-        if items.isEmpty {
-            lines.append("(no query parameters)")
-        }
-        var replaced: [String] = []
-        var origins: [String] = []
-        var nested: [String] = []
-        for index in items.indices {
-            let name = items[index].name
-            let raw = items[index].value ?? ""
-            let outcome = rewriteValue(raw, key: name, depth: 0)
-            let shown = raw.isEmpty ? "(empty)" : raw
-            if outcome.value != raw {
-                lines.append("- \(name) = \(shown)")
-                lines.append("  tried: \(outcome.note)")
-                items[index].value = outcome.value
-                if outcome.kind == .redirect {
-                    replaced.append(name)
-                } else if outcome.kind == .origin {
-                    origins.append("\(name)=\(fullyDecoded(raw))")
-                } else if outcome.kind == .nested {
-                    nested.append(name)
-                }
-            } else {
-                lines.append("- \(name) = \(shown)")
-                lines.append("  left unchanged")
-            }
-        }
-        if replaced.isEmpty {
-            let additions = [
-                ("redirect_url", callback),
-                ("redirect_uri", universalCallback),
-                ("next", universalCallback),
-                ("callback", callback)
-            ]
-            let existing = Set(items.map { $0.name.lowercased() })
-            var added: [String] = []
-            for (name, value) in additions where existing.contains(name) == false {
-                items.append(URLQueryItem(name: name, value: value))
-                added.append("\(name)=\(value)")
-            }
-            if added.isEmpty == false {
-                lines.append("Tried: no redirect field was replaced, so added \(added.joined(separator: ", ")).")
-            }
-        } else {
-            lines.append("Tried: replaced \(replaced.joined(separator: ", ")) with \(callback) or \(universalCallback).")
-        }
-        if origins.isEmpty == false {
-            lines.append("Tried: return-target params \(origins.joined(separator: ", ")) set to repostsweep.")
-        }
-        if nested.isEmpty == false {
-            lines.append("Tried: rewrote nested redirect fields inside \(nested.joined(separator: ", ")).")
-        }
-        components.queryItems = items.isEmpty ? nil : items
-        let rebuilt = components.url ?? url
-        lines.append("Rewritten URL:")
-        lines.append(rebuilt.absoluteString)
-        return (rebuilt, lines.joined(separator: "\n"))
-    }
-
-    private enum Kind {
-        case unchanged
-        case redirect
-        case origin
-        case nested
-    }
-
-    private struct Outcome {
-        var value: String
-        var note: String
-        var kind: Kind
-    }
-
-    private static func rewriteValue(_ raw: String, key: String, depth: Int) -> Outcome {
-        if depth > 6 {
-            return Outcome(value: raw, note: "left unchanged", kind: .unchanged)
-        }
-        let decoded = fullyDecoded(raw)
-        let keyName = key.lowercased()
-
-        if let data = decoded.data(using: .utf8),
-           decoded.first == "{" || decoded.first == "[",
-           let object = try? JSONSerialization.jsonObject(with: data),
-           object is [String: Any] || object is [Any] {
-            let (rewritten, notes) = rewriteJSON(object, depth: depth + 1)
-            if notes.isEmpty == false,
-               let data = try? JSONSerialization.data(withJSONObject: rewritten, options: [.withoutEscapingSlashes]),
-               let text = String(data: data, encoding: .utf8) {
-                return Outcome(value: text, note: "nested JSON: \(notes.joined(separator: ", "))", kind: .nested)
-            }
-        }
-
-        if containerKeys.contains(keyName) {
-            if let nestedURL = nestedURLRewrite(decoded, depth: depth),
-               nestedURL.value != decoded && nestedURL.value != raw {
-                return Outcome(value: nestedURL.value, note: nestedURL.note, kind: .nested)
-            }
-            return Outcome(value: raw, note: "left unchanged", kind: .unchanged)
-        }
-
-        if isRedirectKey(keyName), isWebTarget(decoded) {
-            let target = replacement(for: keyName)
-            return Outcome(value: target, note: "replaced web return value with \(target)", kind: .redirect)
-        }
-
-        if let nestedURL = nestedURLRewrite(decoded, depth: depth) {
-            if isRedirectKey(keyName), isWebTarget(nestedURL.value) || isWebTarget(decoded) {
-                let target = replacement(for: keyName)
-                return Outcome(value: target, note: "replaced \(key) URL with \(target). Inner: \(nestedURL.note)", kind: .redirect)
-            }
-            if nestedURL.value != decoded && nestedURL.value != raw {
-                return Outcome(value: nestedURL.value, note: nestedURL.note, kind: .nested)
-            }
-        }
-
-        if isOriginKey(keyName), isWebOrigin(decoded) {
-            return Outcome(value: "repostsweep", note: "return-target \(key)=\(decoded) set to repostsweep", kind: .origin)
-        }
-
-        return Outcome(value: raw, note: "left unchanged", kind: .unchanged)
-    }
-
-    private static func nestedURLRewrite(_ decoded: String, depth: Int) -> (value: String, note: String)? {
-        guard decoded.contains("://"), var components = URLComponents(string: decoded), components.queryItems?.isEmpty == false else {
-            return nil
-        }
-        var notes: [String] = []
-        var items = components.queryItems ?? []
-        var changed = false
-        for index in items.indices {
-            let name = items[index].name
-            let value = items[index].value ?? ""
-            let outcome = rewriteValue(value, key: name, depth: depth + 1)
-            if outcome.value != value {
-                items[index].value = outcome.value
-                changed = true
-                notes.append("\(name): \(outcome.note)")
-            }
-        }
-        guard changed else { return nil }
-        components.queryItems = items
-        let rebuilt = components.string ?? decoded
-        return (rebuilt, notes.joined(separator: "; "))
-    }
-
-    private static func rewriteJSON(_ object: Any, depth: Int) -> (Any, [String]) {
-        if let dict = object as? [String: Any] {
-            var copy = dict
-            var notes: [String] = []
-            for (key, value) in dict {
-                if let string = value as? String {
-                    let outcome = rewriteValue(string, key: key, depth: depth)
-                    if outcome.value != string {
-                        copy[key] = outcome.value
-                        notes.append("\(key) \(outcome.note)")
-                    }
-                } else if value is [String: Any] || value is [Any] {
-                    let (next, inner) = rewriteJSON(value, depth: depth + 1)
-                    if inner.isEmpty == false {
-                        copy[key] = next
-                        notes.append(contentsOf: inner)
-                    }
-                }
-            }
-            return (copy, notes)
-        }
-        if let array = object as? [Any] {
-            var copy = array
-            var notes: [String] = []
-            for (index, value) in array.enumerated() {
-                if let string = value as? String {
-                    let outcome = rewriteValue(string, key: "[\(index)]", depth: depth)
-                    if outcome.value != string {
-                        copy[index] = outcome.value
-                        notes.append(outcome.note)
-                    }
-                } else if value is [String: Any] || value is [Any] {
-                    let (next, inner) = rewriteJSON(value, depth: depth + 1)
-                    if inner.isEmpty == false {
-                        copy[index] = next
-                        notes.append(contentsOf: inner)
-                    }
-                }
-            }
-            return (copy, notes)
-        }
-        return (object, [])
-    }
-
-    private static func replacement(for key: String) -> String {
-        httpsReturnKeys.contains(key) ? universalCallback : callback
-    }
-
-    private static func isRedirectKey(_ key: String) -> Bool {
-        if redirectKeys.contains(key) { return true }
-        if key.contains("redirect") || key.contains("callback") || key.contains("return") { return true }
-        return false
-    }
-
-    private static func isOriginKey(_ key: String) -> Bool {
-        originKeys.contains(key)
-    }
-
-    private static func isWebTarget(_ value: String) -> Bool {
-        let lower = value.lowercased()
-        if lower.hasPrefix("http://") || lower.hasPrefix("https://") { return true }
-        if lower.contains("tiktok.com") && (lower.contains("://") || lower.hasPrefix("www.")) { return true }
-        return false
-    }
-
-    private static func isWebOrigin(_ value: String) -> Bool {
-        let lower = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if webOrigins.contains(lower) { return true }
-        if lower.contains("tiktok.com") { return true }
-        return false
-    }
-
-    private static func fullyDecoded(_ value: String) -> String {
-        var current = value
-        for _ in 0..<4 {
-            guard let next = current.removingPercentEncoding, next != current else { break }
-            current = next
-        }
-        return current
-    }
-}
 
 private enum TikTokURL {
     static let mobileSafari = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
-    static let home = URL(string: "https://www.tiktok.com/")!
+    static let profileLanding = URL(string: "https://www.tiktok.com/profile")!
     static let login = URL(string: "https://www.tiktok.com/login?lang=en")!
 
     static func profile(_ uniqueId: String) -> URL? {
@@ -1521,6 +1270,12 @@ extension TikTokWebSession: WKNavigationDelegate {
             self.isPageLoading = true
             self.pageError = nil
             self.loginProgress = 0.08
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        Task { @MainActor in
+            self.silencePlayback(on: self.webView)
         }
     }
 

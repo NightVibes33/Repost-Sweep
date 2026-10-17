@@ -35,14 +35,14 @@ enum Theme {
 }
 
 enum Typeface {
-    static let hero = Font.system(size: 68, weight: .heavy, design: .rounded)
-    static let largeTitle = Font.system(size: 34, weight: .bold, design: .rounded)
-    static let onboarding = Font.system(size: 30, weight: .bold, design: .rounded)
-    static let title = Font.system(size: 22, weight: .semibold, design: .rounded)
-    static let body = Font.system(size: 17, weight: .regular, design: .rounded)
-    static let secondary = Font.system(size: 15, weight: .regular, design: .rounded)
-    static let caption = Font.system(size: 13, weight: .medium, design: .rounded)
-    static let button = Font.system(size: 17, weight: .semibold, design: .rounded)
+    static let hero = Font.system(size: 56, weight: .bold)
+    static let largeTitle = Font.system(size: 34, weight: .bold)
+    static let onboarding = Font.system(size: 28, weight: .bold)
+    static let title = Font.system(size: 22, weight: .semibold)
+    static let body = Font.system(size: 17, weight: .regular)
+    static let secondary = Font.system(size: 15, weight: .regular)
+    static let caption = Font.system(size: 13, weight: .regular)
+    static let button = Font.system(size: 17, weight: .semibold)
 }
 
 enum Motion {
@@ -55,11 +55,20 @@ enum ScreenLayout {
     }
 
     static var ring: CGFloat {
-        isNarrow ? 176 : 230
+        isNarrow ? 168 : 220
+    }
+
+    static func progressRing(width: CGFloat, height: CGFloat) -> CGFloat {
+        let cap: CGFloat = height < 700 ? 168 : 220
+        return min(cap, max(140, width - 96))
     }
 
     static var onboardingRing: CGFloat {
         isNarrow ? 168 : 220
+    }
+
+    static var horizontal: CGFloat {
+        isNarrow ? 16 : 20
     }
 }
 

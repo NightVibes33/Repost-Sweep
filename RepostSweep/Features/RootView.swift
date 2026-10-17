@@ -32,10 +32,6 @@ struct RootView: View {
         .onOpenURL { url in
             session.handleAuthCallback(url)
         }
-        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
-            guard let url = activity.webpageURL else { return }
-            session.handleAuthCallback(url)
-        }
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 session.sceneBecameActive()

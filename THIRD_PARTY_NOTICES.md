@@ -34,7 +34,7 @@ SOFTWARE.
 
 ## BrittAbdula/tiktokrepostremover (ClearTok)
 
-Used for the video-page removal controls and the already-reposted check: `[data-e2e="video-share-repost"]`, share and repost-tab selectors, and treating a control as already reposted when `aria-pressed` is true, the icon is filled, or the color is not white. The tap path only clicks that control, then waits for the delete request or a confirmation.
+Used for the video-page share and repost-tab selectors. A control is tapped only when its `data-e2e` contains `remove-repost` or `aria-pressed` is true. Fill and color are not used.
 
 https://github.com/BrittAbdula/tiktokrepostremover
 
@@ -64,4 +64,4 @@ SOFTWARE.
 
 ## kien234/tiktok-unrepost
 
-No license is declared, and the repository ships a bundled webmssdk script. None of its source is copied. The idea of taking a URL the page already signed, pointing it at `/tiktok/v1/upvote/delete`, stripping `X-Bogus`, `X-Gnarly`, and `_signature`, then asking the page signer again, is reimplemented in `TikTokBridge.js`.
+No license is declared, and the repository ships a bundled webmssdk script. None of its source is copied. Repost Sweep does not replay a captured signed URL. Removal sends one plain `aid` and `item_id` POST with the page csrf token.

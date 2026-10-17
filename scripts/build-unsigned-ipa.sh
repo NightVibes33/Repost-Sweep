@@ -35,6 +35,7 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
+  SWIFT_ACTIVE_COMPILATION_CONDITIONS=SIDELOAD_UNLOCK \
   build
 
 APP="$DERIVED/Build/Products/Release-iphoneos/RepostSweep.app"

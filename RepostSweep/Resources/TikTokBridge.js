@@ -6,12 +6,9 @@
 // - The upvote/delete request (POST, empty body, aid + item_id on the query,
 //   tt-csrf-token from webapp.app-context) and the “re-list and confirm the
 //   id is gone” check follow gabireze/tiktok-all-reposted-videos-remover (MIT).
-// - Repost-button selectors and the already-reposted check follow
-//   BrittAbdula/tiktokrepostremover (MIT, ClearTok).
-// - Retargeting a captured signed URL onto /tiktok/v1/upvote/delete and
-//   re-signing it is a clean-room reimplementation of the approach in
-//   kien234/tiktok-unrepost. That repo has no license, so its code is not
-//   included here.
+// - The share-sheet selectors follow BrittAbdula/tiktokrepostremover (MIT, ClearTok).
+//   A control is tapped only when data-e2e contains remove-repost or aria-pressed is true.
+//   Fill color is not used, and captured signed URLs are not replayed.
 (function () {
   "use strict";
 
@@ -65,16 +62,13 @@
       XMLHttpRequest.prototype.send = function (body) {
         try {
           var url = String(this.__rsURL || "");
-          if (!window.__repostSweepReplay) {
-            noteTraffic(url);
-            if (isDeleteURL(url)) {
+          if (!window.__repostSweepReplay && isDeleteURL(url)) {
               window.__repostSweepNetHook.lastDelete = {
                 url: url,
                 method: String(this.__rsMethod || "POST"),
                 body: bodyToString(body)
               };
               window.__repostSweepNetHook.lastDeleteAt = Date.now();
-            }
           }
         } catch (error) {
           /* capture is best-effort */
@@ -85,7 +79,7 @@
     }
   }
 
-  if (window.__repostSweep && window.__repostSweep.version >= 2) {
+  if (window.__repostSweep && window.__repostSweep.version >= 4) {
     installNetHook();
     return;
   }
@@ -159,15 +153,6 @@
     return "";
   }
 
-  function noteTraffic(url) {
-    var hook = window.__repostSweepNetHook;
-    if (!hook) return;
-    var text = String(url || "");
-    if (/X-Bogus|X-Gnarly|_signature|msToken=/i.test(text)) {
-      hook.lastSignedURL = text;
-    }
-  }
-
   function recordDelete(input, init) {
     if (window.__repostSweepReplay) return;
     var url = "";
@@ -179,7 +164,6 @@
       method = input.method || method;
     }
     if (init && init.method) method = init.method;
-    noteTraffic(url);
     if (!isDeleteURL(String(url))) return;
     var body = "";
     if (init && init.body != null) body = bodyToString(init.body);
@@ -752,17 +736,6 @@
     return method + " " + clean.slice(0, 240) + " → http " + status + " " + snippet(text);
   }
 
-  function retargetDeleteURL(template, itemId) {
-    var parsed = new URL(template, location.origin);
-    parsed.pathname = "/tiktok/v1/upvote/delete";
-    if (!parsed.searchParams.get("aid")) parsed.searchParams.set("aid", "1988");
-    parsed.searchParams.set("item_id", itemId);
-    ["X-Bogus", "x-bogus", "X-Gnarly", "x-gnarly", "_signature"].forEach(function (key) {
-      parsed.searchParams.delete(key);
-    });
-    return parsed.pathname + parsed.search;
-  }
-
   async function postUpvoteDelete(url, body) {
     var signed = await signURL(url);
     var finalURL = signed || url;
@@ -807,38 +780,19 @@
     if (!/^\d{6,}$/.test(itemId)) return fail("PARSE", "That repost id doesn’t look usable.");
     if (!onTikTok()) return fail("NOT_ON_TIKTOK", "Open TikTok and sign in.");
 
-    var logs = [];
-    var blocked = null;
-    function take(result) {
-      if (result && result.log) logs.push(result.log);
-      if (!blocked && result && (result.kind === "rate" || result.kind === "auth")) blocked = result;
+    var plain = new URLSearchParams();
+    plain.set("aid", "1988");
+    plain.set("item_id", itemId);
+    var result;
+    try {
+      result = await postUpvoteDelete("/tiktok/v1/upvote/delete/?" + plain.toString(), "");
+    } catch (error) {
+      return fail("ATTEMPTED", "The unrepost request didn’t finish.");
     }
-
-    var hook = window.__repostSweepNetHook;
-    var template = (hook && (hook.lastSignedURL || (hook.lastDelete && hook.lastDelete.url))) || "";
-    if (template) {
-      try {
-        take(await postUpvoteDelete(retargetDeleteURL(template, itemId), ""));
-      } catch (error) {
-        logs.push("Signed retarget did not finish.");
-      }
-    }
-
-    if (!blocked) {
-      var plain = new URLSearchParams();
-      plain.set("aid", "1988");
-      plain.set("item_id", itemId);
-      try {
-        take(await postUpvoteDelete("/tiktok/v1/upvote/delete/?" + plain.toString(), ""));
-      } catch (error) {
-        logs.push("Plain upvote/delete did not finish.");
-      }
-    }
-
-    var message = logs.join("\n") || "No unrepost request was sent.";
-    if (blocked && blocked.kind === "rate") return fail("RATE_LIMITED", message);
-    if (blocked && blocked.kind === "auth") return fail("NOT_LOGGED_IN", message);
-    return fail("ATTEMPTED", message);
+    if (result && result.kind === "rate") return fail("RATE_LIMITED", "TikTok asked for a pause.");
+    if (result && result.kind === "auth") return fail("NOT_LOGGED_IN", "TikTok doesn’t see the sign-in.");
+    if (result && result.kind === "ok") return fail("OK", "Delete request accepted.");
+    return fail("ATTEMPTED", "Delete request sent.");
   }
 
   async function confirmRemoved(payload) {
@@ -846,25 +800,28 @@
     var itemId = String(input.itemId || "");
     if (!/^\d{6,}$/.test(itemId)) return fail("PARSE", "That repost id doesn’t look usable.");
     await delay(1200);
+    var maxPages = Number(input.maxPages);
+    if (!isFinite(maxPages) || maxPages < 1) maxPages = 2;
+    if (maxPages > 2) maxPages = 2;
     var cursor = "0";
     var seen = 0;
-    for (var page = 0; page < 20; page += 1) {
+    for (var page = 0; page < maxPages; page += 1) {
       var result = await list({ cursor: cursor, secUid: String(input.secUid || ""), mode: "api" });
       if (!result.ok) {
-        return fail(result.code || "UNVERIFIED", "Couldn’t verify against the repost list. " + (result.message || ""));
+        return fail(result.code || "UNVERIFIED", "Couldn’t verify against the repost list.");
       }
       for (var i = 0; i < result.items.length; i += 1) {
         seen += 1;
         if (String(result.items[i].id) === itemId) {
-          return fail("STILL_THERE", "Item " + itemId + " is still on the repost list.");
+          return fail("STILL_THERE", "That repost is still on the list.");
         }
       }
       if (!result.hasMore || !result.cursor || result.cursor === cursor) {
-        return succeed({ message: "Verified: " + itemId + " is gone from the repost list (" + seen + " checked)." });
+        return succeed({ message: "Not on the first pages of the repost list." });
       }
       cursor = result.cursor;
     }
-    return fail("UNVERIFIED", "The repost list is longer than this check, so removal was not confirmed.");
+    return fail("UNVERIFIED", "Not on the first pages. The sweep checks the full list at the end.");
   }
 
   function listFromDom() {
@@ -1040,53 +997,18 @@
 
   function isRemoveRepost(el) {
     var e2e = (el.getAttribute("data-e2e") || "").toLowerCase();
-    if (
-      e2e === "share-remove-repost" ||
-      e2e === "video-share-remove-repost" ||
-      e2e === "browse-remove-repost" ||
-      e2e.indexOf("remove-repost") !== -1
-    ) {
-      return true;
-    }
-    var text = controlText(el).toLowerCase();
-    if (text.indexOf("remove repost") !== -1) return true;
-    if (text.indexOf("unrepost") !== -1) return true;
-    if (text.indexOf("remove from repost") !== -1) return true;
-    return false;
+    return e2e.indexOf("remove-repost") !== -1;
   }
 
-  // ClearTok (MIT): a repost control counts as already reposted when it is
-  // pressed, its icon is filled, or its color is no longer white.
-  function isAlreadyReposted(el) {
-    if (!el) return false;
-    if (el.getAttribute("aria-pressed") === "true") return true;
-    if (el.querySelector("svg [fill]:not([fill='none'])")) return true;
-    try {
-      var color = window.getComputedStyle(el).color;
-      if (color && color !== "rgb(255, 255, 255)" && color !== "rgba(255, 255, 255, 1)") return true;
-    } catch (error) {
-      return false;
-    }
-    return false;
+  function isPressedRepost(el) {
+    return el.getAttribute("aria-pressed") === "true";
   }
 
-  function findRepostedToggle() {
-    var selectors = [
-      '[data-e2e="video-share-repost"]',
-      '[data-e2e="browse-repost"]',
-      'button[aria-label*="repost" i]'
-    ];
-    for (var i = 0; i < selectors.length; i += 1) {
-      var nodes = document.querySelectorAll(selectors[i]);
-      for (var j = 0; j < nodes.length; j += 1) {
-        if (!isVisible(nodes[j])) continue;
-        var text = controlText(nodes[j]).toLowerCase();
-        if (text === "repost" || text === "reposts") {
-          if (nodes[j].getAttribute("aria-pressed") === "true") return nodes[j];
-          continue;
-        }
-        if (isAlreadyReposted(nodes[j])) return nodes[j];
-      }
+  function findPressedRepost() {
+    var nodes = document.querySelectorAll("button, a, div[role='button'], [aria-pressed='true']");
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (!isVisible(nodes[i])) continue;
+      if (isPressedRepost(nodes[i])) return nodes[i];
     }
     return null;
   }
@@ -1133,17 +1055,17 @@
 
   async function unrepostTap() {
     if (!onTikTok()) return fail("NOT_ON_TIKTOK", "The video page isn’t on TikTok.");
-    var control = findRemoveControl() || findRepostedToggle();
+    var control = findRemoveControl() || findPressedRepost();
     if (!control) {
       var share = findShare();
       if (share) {
         activate(share);
         await delay(700);
-        control = findRemoveControl() || findRepostedToggle();
+        control = findRemoveControl() || findPressedRepost();
       }
     }
     if (!control) {
-      return fail("UI_CHANGED", "Couldn’t find Remove repost, or a repost button that is already on.");
+      return fail("UI_CHANGED", "Couldn’t find Remove repost.");
     }
     var hook = window.__repostSweepNetHook || {};
     var before = hook.lastDeleteAt || 0;
@@ -1195,7 +1117,7 @@
 
   installNetHook();
   window.__repostSweep = {
-    version: 3,
+    version: 4,
     detect: detect,
     list: list,
     remove: remove,

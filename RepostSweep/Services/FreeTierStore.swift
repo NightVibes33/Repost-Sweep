@@ -15,11 +15,19 @@ final class FreeTierStore: ObservableObject {
     }
 
     var remaining: Int {
-        max(0, Monetization.freeRemovalLimit - used)
+        #if SIDELOAD_UNLOCK
+        return 1_000_000
+        #else
+        return max(0, Monetization.freeRemovalLimit - used)
+        #endif
     }
 
     func recordRemoval() {
+        #if SIDELOAD_UNLOCK
+        return
+        #else
         used += 1
         UserDefaults.standard.set(used, forKey: defaultsKey)
+        #endif
     }
 }
