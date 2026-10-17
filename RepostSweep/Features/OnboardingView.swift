@@ -70,7 +70,7 @@ struct OnboardingView: View {
                         .foregroundStyle(Theme.muted)
                 }
             }
-            .frame(width: 220, height: 220)
+            .frame(width: ScreenLayout.onboardingRing, height: ScreenLayout.onboardingRing)
             Text("See every repost, then take the ones you choose off your tab.")
                 .font(Typeface.body)
                 .foregroundStyle(Theme.muted)
@@ -89,7 +89,7 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
                 .minimumScaleFactor(0.8)
-            AppGlyph(size: 168)
+            AppGlyph(size: ScreenLayout.isNarrow ? 128 : 168)
                 .padding(.vertical, 12)
             Text("Original videos stay up. A removal only drops a video from your reposts.")
                 .font(Typeface.body)

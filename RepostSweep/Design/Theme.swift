@@ -49,6 +49,20 @@ enum Motion {
     static let spring = Animation.spring(response: 0.4, dampingFraction: 0.8)
 }
 
+enum ScreenLayout {
+    static var isNarrow: Bool {
+        UIScreen.main.bounds.width <= 360
+    }
+
+    static var ring: CGFloat {
+        isNarrow ? 176 : 230
+    }
+
+    static var onboardingRing: CGFloat {
+        isNarrow ? 168 : 220
+    }
+}
+
 enum Haptics {
     static func tap() {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()

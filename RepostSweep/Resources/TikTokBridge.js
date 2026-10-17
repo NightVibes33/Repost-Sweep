@@ -1008,7 +1008,7 @@
       lastLabels = found.labels;
       if (found.visibleHref) {
         location.href = found.visibleHref;
-        return succeed({ message: "Opened " + found.visibleHref.slice(0, 140) });
+        return succeed({ message: "Opened " + found.visibleHref });
       }
       if (found.labelEl) {
         var label = controlText(found.labelEl).slice(0, 80);
@@ -1020,14 +1020,14 @@
           var nextHref = again.visibleHref || again.hiddenHref;
           if (nextHref) {
             location.href = nextHref;
-            return succeed({ message: "Opened " + nextHref.slice(0, 140) });
+            return succeed({ message: "Opened " + nextHref });
           }
         }
         return succeed({ message: "Tapped “" + label + "”." });
       }
       if (found.hiddenHref) {
         location.href = found.hiddenHref;
-        return succeed({ message: "Opened " + found.hiddenHref.slice(0, 140) });
+        return succeed({ message: "Opened " + found.hiddenHref });
       }
       await delay(350);
     }

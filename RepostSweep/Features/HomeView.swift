@@ -46,7 +46,9 @@ struct HomeView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if signedIn == false {
+                if session.showLoginSuccess {
+                    loginSuccess
+                } else if signedIn == false {
                     signIn
                 } else if runner.isRunning || showingSuccess {
                     progress
@@ -54,6 +56,7 @@ struct HomeView: View {
                     dashboard
                 }
             }
+            .animation(Motion.spring, value: session.showLoginSuccess)
             .animation(Motion.spring, value: signedIn)
             .animation(Motion.spring, value: runner.isRunning)
             .animation(Motion.spring, value: showingSuccess)
@@ -147,7 +150,40 @@ struct HomeView: View {
                     selected = Set(session.reposts.map(\.id))
                 }
             }
+            .task(id: session.showLoginSuccess) {
+                guard session.showLoginSuccess else { return }
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                session.showLoginSuccess = false
+            }
         }
+    }
+
+    private var loginSuccess: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: ScreenLayout.isNarrow ? 72 : 84, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Theme.success)
+                .accessibilityHidden(true)
+            Text("You’re in")
+                .font(Typeface.largeTitle)
+                .foregroundStyle(Theme.ink)
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.7)
+                .lineLimit(2)
+            Text("TikTok sent you back. Opening your reposts.")
+                .font(Typeface.body)
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(.horizontal, Theme.margin)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ScreenBackdrop())
+        .toolbar(.hidden, for: .navigationBar)
+        .transition(.opacity.combined(with: .scale(scale: 0.96)))
     }
 
     private var signIn: some View {
@@ -325,7 +361,7 @@ struct HomeView: View {
                         .foregroundStyle(Theme.muted)
                 }
             }
-            .frame(width: 240, height: 240)
+            .frame(width: ScreenLayout.ring, height: ScreenLayout.ring)
             .accessibilityLabel("\(runner.remainingCount) left")
             Text(runner.statusText.isEmpty ? "Removing" : runner.statusText)
                 .font(Typeface.body)
@@ -488,7 +524,7 @@ struct HomeView: View {
                             .foregroundStyle(Theme.muted)
                     }
                 }
-                .frame(width: 230, height: 230)
+                .frame(width: ScreenLayout.ring, height: ScreenLayout.ring)
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel("\(session.reposts.count) reposts")
             }
@@ -638,7 +674,7 @@ struct HomeView: View {
     }
 
     private var loginControl: some View {
-        TikTokLoginControl(phase: session.appLoginPhase) {
+        TikTokLoginControl(phase: session.appLoginPhase, finishing: session.isFinishingReturn) {
             session.beginLogin()
         } onCancel: {
             session.cancelLogin()

@@ -143,8 +143,8 @@ struct FreeMeter: View {
 struct PressScaleStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .opacity(configuration.isPressed ? 0.92 : 1)
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.88 : 1)
             .animation(Motion.spring, value: configuration.isPressed)
     }
 }
@@ -237,6 +237,7 @@ struct ContinueWithTikTokButton: View {
 
 struct TikTokLoginControl: View {
     var phase: TikTokWebSession.AppLoginPhase
+    var finishing: Bool = false
     var onStart: () -> Void
     var onCancel: () -> Void
 
@@ -247,7 +248,7 @@ struct TikTokLoginControl: View {
         case .loading:
             waiting(title: "Opening TikTok…")
         case .waiting:
-            waiting(title: "Waiting for TikTok…")
+            waiting(title: finishing ? "Finishing sign-in…" : "Waiting for TikTok…")
         case .failed(let message):
             VStack(alignment: .leading, spacing: 12) {
                 ScrollView {
@@ -631,6 +632,7 @@ struct IconChip: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 16, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(Theme.ink)
                 .frame(width: 40, height: 40)
                 .background(Theme.card, in: Circle())
@@ -651,7 +653,8 @@ struct BottomBar<Content: View>: View {
         .padding(.top, 12)
         .padding(.bottom, 16)
         .frame(maxWidth: .infinity)
-        .background(Theme.canvas)
+        .background(.ultraThinMaterial)
+        .background(Theme.canvas.opacity(0.72))
         .readableColumn()
     }
 }

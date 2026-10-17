@@ -146,6 +146,7 @@ final class RemovalRunner: ObservableObject {
 
         current = nil
         session.removalActive = false
+        session.parkWebView()
         isRunning = false
         isFinished = true
         isPaused = false
